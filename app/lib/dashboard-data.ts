@@ -81,19 +81,33 @@ async function readTable<T>(
     throw new Error("Supabase environment variables are missing.");
   }
 
-  const response = await fetch(
-    `${url}/rest/v1/${table}?select=${encodeURIComponent(select)}&limit=${limit}`,
-    {
-      headers: headers(key),
-      next: { revalidate: 300 },
-    },
-  );
+  const rows: T[] = [];
+  const pageSize = 1000;
 
-  if (!response.ok) {
-    throw new Error(`Supabase read failed for ${table}: ${response.status}`);
+  for (let offset = 0; offset < limit; offset += pageSize) {
+    const response = await fetch(
+      `${url}/rest/v1/${table}?select=${encodeURIComponent(select)}`,
+      {
+        headers: {
+          ...headers(key),
+          "range-unit": "items",
+          range: `${offset}-${Math.min(offset + pageSize - 1, limit - 1)}`,
+        },
+        cache: "no-store",
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Supabase read failed for ${table}: ${response.status}`);
+    }
+
+    const page = (await response.json()) as T[];
+    rows.push(...page);
+
+    if (page.length < pageSize) break;
   }
 
-  return response.json();
+  return rows;
 }
 
 function pct(part: number, total: number) {
