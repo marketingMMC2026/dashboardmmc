@@ -1,11 +1,26 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import type { CampaignRow, DashboardData } from "@/app/lib/dashboard-data";
+import type { CampaignRow, DashboardData, LeadRow } from "@/app/lib/dashboard-data";
 
 type Props = {
   initialData: DashboardData;
 };
+
+type ColumnKey =
+  | "name"
+  | "contact"
+  | "source"
+  | "campaign"
+  | "adset"
+  | "ad"
+  | "form"
+  | "qualified"
+  | "scheduled"
+  | "hasOffice"
+  | "revenueRange"
+  | "scheduleStatus"
+  | "summary";
 
 const currency = new Intl.NumberFormat("pt-BR", {
   style: "currency",
@@ -14,9 +29,42 @@ const currency = new Intl.NumberFormat("pt-BR", {
 
 const number = new Intl.NumberFormat("pt-BR");
 
+const leadColumns: { key: ColumnKey; label: string }[] = [
+  { key: "name", label: "Lead" },
+  { key: "contact", label: "Contato" },
+  { key: "source", label: "Origem" },
+  { key: "campaign", label: "Campanha" },
+  { key: "adset", label: "Conjunto" },
+  { key: "ad", label: "Anúncio" },
+  { key: "form", label: "Formulário" },
+  { key: "qualified", label: "Qualificado" },
+  { key: "scheduled", label: "Agendado" },
+  { key: "hasOffice", label: "Tem escritório" },
+  { key: "revenueRange", label: "Faturamento" },
+  { key: "scheduleStatus", label: "Status agendamento" },
+  { key: "summary", label: "Resumo IA" },
+];
+
+const defaultLeadColumns: ColumnKey[] = [
+  "name",
+  "contact",
+  "source",
+  "campaign",
+  "qualified",
+  "scheduled",
+  "hasOffice",
+  "revenueRange",
+  "form",
+];
+
 function formatDate(value?: string) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
+}
+
+function boolLabel(value: boolean | null) {
+  if (value === null) return "-";
+  return value ? "Sim" : "Não";
 }
 
 function Bar({ value, max }: { value: number; max: number }) {
@@ -110,7 +158,234 @@ function RankingTable({ rows }: { rows: CampaignRow[] }) {
   );
 }
 
-export function Dashboard({ initialData }: Props) {
+function LeadCell({ lead, column }: { lead: LeadRow; column: ColumnKey }) {
+  if (column === "contact") {
+    return (
+      <div className="stackCell">
+        <b>{lead.phone}</b>
+        <span>{lead.email}</span>
+      </div>
+    );
+  }
+
+  if (column === "qualified") return <span className={`badge ${lead.qualified ? "good" : ""}`}>{boolLabel(lead.qualified)}</span>;
+  if (column === "scheduled") return <span className={`badge ${lead.scheduled ? "good" : ""}`}>{boolLabel(lead.scheduled)}</span>;
+  if (column === "hasOffice") return <span className={`badge ${lead.hasOffice ? "good" : lead.hasOffice === false ? "bad" : ""}`}>{boolLabel(lead.hasOffice)}</span>;
+
+  const value = lead[column];
+  return <span className={column === "summary" ? "clampCell" : ""}>{typeof value === "string" ? value : "-"}</span>;
+}
+
+function LeadsView({ data }: { data: DashboardData }) {
+  const [leadView, setLeadView] = useState<"all" | "hot" | "low">("all");
+  const [search, setSearch] = useState("");
+  const [period, setPeriod] = useState("30");
+  const [source, setSource] = useState("all");
+  const [campaign, setCampaign] = useState("all");
+  const [qualified, setQualified] = useState("all");
+  const [scheduled, setScheduled] = useState("all");
+  const [hasOffice, setHasOffice] = useState("all");
+  const [revenue, setRevenue] = useState("all");
+  const [pageSize, setPageSize] = useState(50);
+  const [page, setPage] = useState(1);
+  const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(defaultLeadColumns);
+  const [selectedLead, setSelectedLead] = useState<LeadRow | null>(null);
+
+  const uniqueSources = useMemo(() => [...new Set(data.leads.map((lead) => lead.source).filter(Boolean))].sort(), [data.leads]);
+  const uniqueCampaigns = useMemo(() => [...new Set(data.leads.map((lead) => lead.campaign).filter((item) => item && item !== "-"))].sort(), [data.leads]);
+  const uniqueRevenue = useMemo(() => [...new Set(data.leads.map((lead) => lead.revenueRange).filter((item) => item && item !== "-"))].sort(), [data.leads]);
+
+  const filteredLeads = useMemo(() => {
+    const now = Date.now();
+    const maxAge = period === "all" ? null : Number(period) * 24 * 60 * 60 * 1000;
+    const query = search.trim().toLowerCase();
+
+    return data.leads.filter((lead) => {
+      const createdAt = new Date(lead.createdAt).getTime();
+      const text = `${lead.name} ${lead.phone} ${lead.email} ${lead.source} ${lead.campaign} ${lead.form} ${lead.summary}`.toLowerCase();
+
+      if (leadView !== "all" && lead.quality !== leadView) return false;
+      if (maxAge && now - createdAt > maxAge) return false;
+      if (query && !text.includes(query)) return false;
+      if (source !== "all" && lead.source !== source) return false;
+      if (campaign !== "all" && lead.campaign !== campaign) return false;
+      if (qualified !== "all" && String(lead.qualified) !== qualified) return false;
+      if (scheduled !== "all" && String(lead.scheduled) !== scheduled) return false;
+      if (hasOffice !== "all" && String(lead.hasOffice) !== hasOffice) return false;
+      if (revenue !== "all" && lead.revenueRange !== revenue) return false;
+      return true;
+    });
+  }, [campaign, data.leads, hasOffice, leadView, period, qualified, revenue, scheduled, search, source]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const pagedLeads = filteredLeads.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const hotLeads = filteredLeads.filter((lead) => lead.quality === "hot").length;
+  const qualifiedLeads = filteredLeads.filter((lead) => lead.qualified).length;
+  const scheduledLeads = filteredLeads.filter((lead) => lead.scheduled).length;
+
+  function toggleColumn(column: ColumnKey) {
+    setVisibleColumns((current) => {
+      if (current.includes(column)) return current.filter((item) => item !== column);
+      return [...current, column];
+    });
+  }
+
+  return (
+    <section className="leadsLayout">
+      <div className="leadSummaryGrid">
+        <MetricCard label="Leads filtrados" value={number.format(filteredLeads.length)} detail="Resultado dos filtros atuais" />
+        <MetricCard label="Leads quentes" value={number.format(hotLeads)} detail="Qualificados, agendados ou com sinais fortes" tone="warn" />
+        <MetricCard label="Qualificados" value={number.format(qualifiedLeads)} detail="Marcados no funil comercial" tone="good" />
+        <MetricCard label="Agendados" value={number.format(scheduledLeads)} detail="Com status de agendamento" />
+      </div>
+
+      <section className="panel tablePanel">
+        <div className="panelHead tools">
+          <div>
+            <p className="eyebrow">Leads</p>
+            <h3>Lista operacional</h3>
+          </div>
+          <div className="segmented">
+            <button className={leadView === "all" ? "active" : ""} onClick={() => { setLeadView("all"); setPage(1); }}>
+              Todos
+            </button>
+            <button className={leadView === "hot" ? "active" : ""} onClick={() => { setLeadView("hot"); setPage(1); }}>
+              Quentes
+            </button>
+            <button className={leadView === "low" ? "active" : ""} onClick={() => { setLeadView("low"); setPage(1); }}>
+              Baixa qualidade
+            </button>
+          </div>
+        </div>
+
+        <div className="filtersGrid">
+          <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Buscar lead" />
+          <select value={period} onChange={(event) => { setPeriod(event.target.value); setPage(1); }}>
+            <option value="7">Últimos 7 dias</option>
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="all">Todo histórico</option>
+          </select>
+          <select value={source} onChange={(event) => { setSource(event.target.value); setPage(1); }}>
+            <option value="all">Todas as origens</option>
+            {uniqueSources.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+          <select value={campaign} onChange={(event) => { setCampaign(event.target.value); setPage(1); }}>
+            <option value="all">Todas as campanhas</option>
+            {uniqueCampaigns.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+          <select value={qualified} onChange={(event) => { setQualified(event.target.value); setPage(1); }}>
+            <option value="all">Qualificação</option>
+            <option value="true">Qualificados</option>
+            <option value="false">Não qualificados</option>
+          </select>
+          <select value={scheduled} onChange={(event) => { setScheduled(event.target.value); setPage(1); }}>
+            <option value="all">Agendamento</option>
+            <option value="true">Agendados</option>
+            <option value="false">Não agendados</option>
+          </select>
+          <select value={hasOffice} onChange={(event) => { setHasOffice(event.target.value); setPage(1); }}>
+            <option value="all">Tem escritório?</option>
+            <option value="true">Sim</option>
+            <option value="false">Não</option>
+            <option value="null">Sem informação</option>
+          </select>
+          <select value={revenue} onChange={(event) => { setRevenue(event.target.value); setPage(1); }}>
+            <option value="all">Todas as faixas</option>
+            {uniqueRevenue.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </div>
+
+        <details className="columnConfig">
+          <summary>Configurar colunas</summary>
+          <div>
+            {leadColumns.map((column) => (
+              <label key={column.key}>
+                <input
+                  type="checkbox"
+                  checked={visibleColumns.includes(column.key)}
+                  onChange={() => toggleColumn(column.key)}
+                />
+                {column.label}
+              </label>
+            ))}
+          </div>
+        </details>
+
+        <div className="tableWrap">
+          <table className="leadsTable">
+            <thead>
+              <tr>
+                {visibleColumns.map((column) => <th key={column}>{leadColumns.find((item) => item.key === column)?.label}</th>)}
+                <th>Ações</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pagedLeads.map((lead) => (
+                <tr key={lead.id} className={`lead-${lead.quality}`}>
+                  {visibleColumns.map((column) => (
+                    <td key={column}>
+                      <LeadCell lead={lead} column={column} />
+                    </td>
+                  ))}
+                  <td>
+                    <button className="smallButton" onClick={() => setSelectedLead(lead)}>Ver</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="paginationBar">
+          <span>
+            Página {currentPage} de {totalPages} · {number.format(filteredLeads.length)} leads
+          </span>
+          <div>
+            <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
+              <option value={30}>30 por página</option>
+              <option value={50}>50 por página</option>
+            </select>
+            <button disabled={currentPage === 1} onClick={() => setPage((item) => Math.max(1, item - 1))}>Anterior</button>
+            <button disabled={currentPage === totalPages} onClick={() => setPage((item) => Math.min(totalPages, item + 1))}>Próxima</button>
+          </div>
+        </div>
+      </section>
+
+      {selectedLead ? (
+        <aside className="leadDrawer" aria-label="Detalhes do lead">
+          <div className="drawerPanel">
+            <div className="panelHead">
+              <div>
+                <p className="eyebrow">Detalhes do lead</p>
+                <h3>{selectedLead.name}</h3>
+              </div>
+              <button className="smallButton" onClick={() => setSelectedLead(null)}>Fechar</button>
+            </div>
+            <div className="drawerFacts">
+              <span>Origem <b>{selectedLead.source}</b></span>
+              <span>Campanha <b>{selectedLead.campaign}</b></span>
+              <span>Qualificado <b>{boolLabel(selectedLead.qualified)}</b></span>
+              <span>Agendado <b>{boolLabel(selectedLead.scheduled)}</b></span>
+            </div>
+            <p className="drawerSummary">{selectedLead.summary}</p>
+            <div className="attributeList">
+              {selectedLead.attributes.map((attr) => (
+                <div key={`${selectedLead.id}-${attr.key}`}>
+                  <span>{attr.key}</span>
+                  <b>{attr.value}</b>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
+      ) : null}
+    </section>
+  );
+}
+
+function DashboardOverview({ initialData }: Props) {
   const [view, setView] = useState<"campaigns" | "sources">("campaigns");
   const [query, setQuery] = useState("");
 
@@ -126,18 +401,7 @@ export function Dashboard({ initialData }: Props) {
   )[0];
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">Agência · Performance</p>
-          <h1>Dashboard de campanhas</h1>
-        </div>
-        <div className="statusPill">
-          <span className={initialData.source === "live" ? "dot live" : "dot"} />
-          {initialData.source === "live" ? "Dados ao vivo" : "Amostra inicial"}
-        </div>
-      </header>
-
+    <>
       <section className="decisionPanel">
         <div>
           <p className="eyebrow">Decisão principal</p>
@@ -239,6 +503,32 @@ export function Dashboard({ initialData }: Props) {
         </div>
         <RankingTable rows={filteredRows} />
       </section>
+    </>
+  );
+}
+
+export function Dashboard({ initialData }: Props) {
+  const [tab, setTab] = useState<"dashboard" | "leads">("dashboard");
+
+  return (
+    <main className="shell">
+      <header className="topbar">
+        <div>
+          <p className="eyebrow">Agência · Performance</p>
+          <h1>Dashboard de campanhas</h1>
+        </div>
+        <div className="statusPill">
+          <span className={initialData.source === "live" ? "dot live" : "dot"} />
+          {initialData.source === "live" ? "Dados ao vivo" : "Amostra inicial"}
+        </div>
+      </header>
+
+      <nav className="mainTabs" aria-label="Navegação do dashboard">
+        <button className={tab === "dashboard" ? "active" : ""} onClick={() => setTab("dashboard")}>Dashboard</button>
+        <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Leads</button>
+      </nav>
+
+      {tab === "dashboard" ? <DashboardOverview initialData={initialData} /> : <LeadsView data={initialData} />}
     </main>
   );
 }

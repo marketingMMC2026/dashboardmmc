@@ -21,6 +21,27 @@ export type FunnelStep = {
   value: number;
 };
 
+export type LeadRow = {
+  id: string;
+  createdAt: string;
+  name: string;
+  phone: string;
+  email: string;
+  source: string;
+  campaign: string;
+  adset: string;
+  ad: string;
+  form: string;
+  qualified: boolean;
+  scheduled: boolean;
+  hasOffice: boolean | null;
+  revenueRange: string;
+  scheduleStatus: string;
+  summary: string;
+  quality: "hot" | "low" | "regular";
+  attributes: { key: string; value: string }[];
+};
+
 export type DashboardData = {
   updatedAt: string;
   source: "live" | "sample";
@@ -38,6 +59,7 @@ export type DashboardData = {
   trends: TrendRow[];
   sources: CampaignRow[];
   campaigns: CampaignRow[];
+  leads: LeadRow[];
   insights: string[];
 };
 
@@ -100,11 +122,42 @@ function isTruthy(value: unknown) {
   return cleaned === "true" || cleaned === "yes" || cleaned === "sim";
 }
 
+function isFalsy(value: unknown) {
+  const cleaned = cleanAttribute(value)?.toLowerCase();
+  return cleaned === "false" || cleaned === "no" || cleaned === "nao" || cleaned === "não";
+}
+
 function normalizeLabel(value: string) {
   return value
     .replaceAll("_", " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function firstAttribute(attrs: Map<string, string> | undefined, keys: string[]) {
+  if (!attrs) return "";
+  for (const key of keys) {
+    const value = cleanAttribute(attrs.get(key));
+    if (value) return value;
+  }
+  return "";
+}
+
+function normalizeBoolean(attrs: Map<string, string> | undefined, keys: string[]) {
+  for (const key of keys) {
+    const value = attrs?.get(key);
+    if (isTruthy(value)) return true;
+    if (isFalsy(value)) return false;
+  }
+  return null;
+}
+
+function isScheduledStatus(status: string) {
+  const normalized = status
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return normalized.includes("agendado") || normalized.includes("quer agendar");
 }
 
 function buildRow(
@@ -205,6 +258,15 @@ export async function getDashboardData(): Promise<DashboardData> {
     const assetById = new Map(assets.map((asset) => [asset.id, asset]));
     const rowsBySource = new Map<string, { ids: Set<string>; last?: string; provider: string }>();
     const rowsByAsset = new Map<string, { ids: Set<string>; last?: string }>();
+    const mediaByLead = new Map<
+      string,
+      {
+        source: string;
+        campaign: string;
+        adset: string;
+        ad: string;
+      }
+    >();
 
     for (const source of sources) {
       if (!source.lead_id || !leadMap.has(source.lead_id)) continue;
@@ -218,6 +280,18 @@ export async function getDashboardData(): Promise<DashboardData> {
       sourceBucket.ids.add(source.lead_id);
       sourceBucket.last = !sourceBucket.last || source.created_at > sourceBucket.last ? source.created_at : sourceBucket.last;
       rowsBySource.set(label, sourceBucket);
+
+      if (!mediaByLead.has(source.lead_id)) {
+        const campaignAsset = source.campaign_asset_id ? assetById.get(source.campaign_asset_id) : undefined;
+        const adsetAsset = source.adset_asset_id ? assetById.get(source.adset_asset_id) : undefined;
+        const adAsset = source.ad_asset_id ? assetById.get(source.ad_asset_id) : undefined;
+        mediaByLead.set(source.lead_id, {
+          source: label,
+          campaign: asString(campaignAsset?.name, source.external_campaign_id || ""),
+          adset: asString(adsetAsset?.name, source.external_adset_id || ""),
+          ad: asString(adAsset?.name, source.external_ad_id || ""),
+        });
+      }
 
       for (const assetId of [source.campaign_asset_id, source.adset_asset_id, source.ad_asset_id]) {
         if (!assetId) continue;
@@ -273,6 +347,54 @@ export async function getDashboardData(): Promise<DashboardData> {
     const best = [...sourceRows, ...campaigns].sort(
       (a, b) => b.qualificationRate - a.qualificationRate || b.qualified - a.qualified,
     )[0];
+    const leadRows: LeadRow[] = leads
+      .map((lead) => {
+        const attrs = attrsByLead.get(lead.id);
+        const media = mediaByLead.get(lead.id);
+        const scheduleStatus = firstAttribute(attrs, ["agendamento_status", "data_agendamento"]);
+        const scheduled = isScheduledStatus(scheduleStatus);
+        const hasOffice = normalizeBoolean(attrs, ["tem_escritorio_", "Tem Escritório"]);
+        const qualified = qualifiedIds.has(lead.id);
+        const phone = firstAttribute(attrs, ["phone_number", "WhatsApp", "numero_whatsapp", "telefone", "phone"]);
+        const email = firstAttribute(attrs, ["email", "E-mail"]);
+        const revenueRange = normalizeLabel(
+          firstAttribute(attrs, [
+            "faixa_faturamento",
+            "Faturamento médio mensal",
+            "Qual é o seu faturamento médio mensal?",
+            "qual_o_faturamento_mensal_de_sua_contabilidade?",
+            "qual_faturamento_mensal_de_sua_contabilidade?",
+          ]),
+        );
+        const allAttributes = [...(attrs?.entries() ?? [])]
+          .map(([key, value]) => ({ key, value }))
+          .sort((a, b) => a.key.localeCompare(b.key));
+        const isHot = qualified || scheduled || hasOffice === true || Boolean(revenueRange && !revenueRange.toLowerCase().includes("menos"));
+        const missingCoreData = !phone || !email || email.includes("{{");
+        const quality: LeadRow["quality"] = isHot ? "hot" : missingCoreData || hasOffice === false ? "low" : "regular";
+
+        return {
+          id: lead.id,
+          createdAt: lead.created_at,
+          name: firstAttribute(attrs, ["full_name", "Nome completo", "Nome", "name"]) || "Sem nome",
+          phone: phone || "-",
+          email: email || "-",
+          source: media?.source || firstAttribute(attrs, ["utm_source"]) || "Sem origem",
+          campaign: media?.campaign || firstAttribute(attrs, ["utm_campaign"]) || "-",
+          adset: media?.adset || firstAttribute(attrs, ["utm_medium"]) || "-",
+          ad: media?.ad || "-",
+          form: firstAttribute(attrs, ["form_name"]) || "-",
+          qualified,
+          scheduled,
+          hasOffice,
+          revenueRange: revenueRange || "-",
+          scheduleStatus: scheduleStatus || "-",
+          summary: firstAttribute(attrs, ["summary_ia", "all_data"]) || "-",
+          quality,
+          attributes: allAttributes,
+        };
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
     return {
       updatedAt: new Date().toISOString(),
@@ -295,6 +417,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       trends: [...trendsByDate.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45),
       sources: sourceRows,
       campaigns,
+      leads: leadRows,
       insights: [
         best ? `${best.name} lidera em taxa de qualificação (${best.qualificationRate}%).` : "Ainda não há volume suficiente para apontar uma vencedora.",
         `${attrsByLead.size} leads têm atributos enriquecidos; esta passa a ser a camada principal de leitura do funil.`,
@@ -342,6 +465,56 @@ export const sampleDashboardData: DashboardData = {
     { id: "120213129522200506", name: "[CA][25/11/25]- SITE - [LEAD] [ONGOING]", level: "campaign", source: "Meta Ads", leads: 886, qualified: 22, qualificationRate: 2.5 },
     { id: "120246295582850506", name: "NOVO FORM. [CJ][21/04/26][INSTA][AMPLO LAL]", level: "adset", source: "Meta Ads", leads: 124, qualified: 7, qualificationRate: 5.6, dailyBudget: 10 },
     { id: "120245793385070506", name: "[CJ][12/04/26][INSTA][TESTECRIATIVOS]", level: "adset", source: "Meta Ads", leads: 101, qualified: 4, qualificationRate: 4, dailyBudget: 30 },
+  ],
+  leads: [
+    {
+      id: "8d75b675-4616-4e48-945a-e0f5494001fb",
+      createdAt: "2026-05-10T20:47:16.325Z",
+      name: "Mônica",
+      phone: "5591980784796",
+      email: "-",
+      source: "manychat",
+      campaign: "-",
+      adset: "-",
+      ad: "-",
+      form: "-",
+      qualified: false,
+      scheduled: true,
+      hasOffice: true,
+      revenueRange: "menos 10K",
+      scheduleStatus: "agendado",
+      summary: "Status agendamento: Agendado. Tem escritório: Sim.",
+      quality: "hot",
+      attributes: [
+        { key: "agendamento_status", value: "agendado" },
+        { key: "faixa_faturamento", value: "menos_10K" },
+        { key: "tem_escritorio_", value: "true" },
+      ],
+    },
+    {
+      id: "4912dfd9-2fd1-4630-95e4-be11fc481032",
+      createdAt: "2026-05-10T18:58:09.496Z",
+      name: "Gustavo",
+      phone: "5533998542823",
+      email: "-",
+      source: "manychat",
+      campaign: "-",
+      adset: "-",
+      ad: "-",
+      form: "-",
+      qualified: false,
+      scheduled: true,
+      hasOffice: true,
+      revenueRange: "30k a 80k",
+      scheduleStatus: "agendado",
+      summary: "Status agendamento: Agendado. Faixa de Faturamento: 30k a 80k.",
+      quality: "hot",
+      attributes: [
+        { key: "agendamento_status", value: "agendado" },
+        { key: "faixa_faturamento", value: "30k_a_80k" },
+        { key: "tem_escritorio_", value: "true" },
+      ],
+    },
   ],
   insights: [
     "Manychat tem a maior taxa de qualificação no retrato inicial, apesar do volume menor.",
