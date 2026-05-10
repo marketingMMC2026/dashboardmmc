@@ -1,0 +1,351 @@
+export type CampaignRow = {
+  id: string;
+  name: string;
+  level: "campaign" | "adset" | "ad" | "source";
+  source: string;
+  leads: number;
+  qualified: number;
+  qualificationRate: number;
+  dailyBudget?: number;
+  lastLeadAt?: string;
+};
+
+export type TrendRow = {
+  date: string;
+  leads: number;
+  qualified: number;
+};
+
+export type FunnelStep = {
+  label: string;
+  value: number;
+};
+
+export type DashboardData = {
+  updatedAt: string;
+  source: "live" | "sample";
+  totals: {
+    leads: number;
+    attributedLeads: number;
+    attributes: number;
+    qualified: number;
+    qualificationRate: number;
+    activeCampaigns: number;
+    activeAdsets: number;
+    activeAds: number;
+  };
+  funnel: FunnelStep[];
+  trends: TrendRow[];
+  sources: CampaignRow[];
+  campaigns: CampaignRow[];
+  insights: string[];
+};
+
+const headers = (key: string) => ({
+  apikey: key,
+  authorization: `Bearer ${key}`,
+  "content-type": "application/json",
+});
+
+async function readTable<T>(
+  table: string,
+  select: string,
+  limit = 5000,
+): Promise<T[]> {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    throw new Error("Supabase environment variables are missing.");
+  }
+
+  const response = await fetch(
+    `${url}/rest/v1/${table}?select=${encodeURIComponent(select)}&limit=${limit}`,
+    {
+      headers: headers(key),
+      next: { revalidate: 300 },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Supabase read failed for ${table}: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function pct(part: number, total: number) {
+  return total > 0 ? Number(((part / total) * 100).toFixed(1)) : 0;
+}
+
+function asString(value: unknown, fallback = "Sem nome") {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function parseBudget(value: unknown) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? amount / 100 : undefined;
+}
+
+function cleanAttribute(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.toLowerCase() === "empty") return undefined;
+  if (trimmed.startsWith("{{") && trimmed.endsWith("}}")) return undefined;
+  return trimmed;
+}
+
+function isTruthy(value: unknown) {
+  const cleaned = cleanAttribute(value)?.toLowerCase();
+  return cleaned === "true" || cleaned === "yes" || cleaned === "sim";
+}
+
+function normalizeLabel(value: string) {
+  return value
+    .replaceAll("_", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildRow(
+  id: string,
+  name: string,
+  level: CampaignRow["level"],
+  source: string,
+  leadIds: Set<string>,
+  qualifiedIds: Set<string>,
+  dailyBudget?: number,
+  lastLeadAt?: string,
+): CampaignRow {
+  const leads = leadIds.size;
+  const qualified = [...leadIds].filter((leadId) => qualifiedIds.has(leadId)).length;
+
+  return {
+    id,
+    name,
+    level,
+    source,
+    leads,
+    qualified,
+    qualificationRate: pct(qualified, leads),
+    dailyBudget,
+    lastLeadAt,
+  };
+}
+
+export async function getDashboardData(): Promise<DashboardData> {
+  try {
+    const [leads, sources, integrations, assets, attributes] = await Promise.all([
+      readTable<{ id: string; created_at: string; qualification: boolean | null }>(
+        "leads",
+        "id,created_at,qualification",
+      ),
+      readTable<{
+        lead_id: string | null;
+        integration_id: string | null;
+        source_type: string | null;
+        campaign_asset_id: string | null;
+        adset_asset_id: string | null;
+        ad_asset_id: string | null;
+        external_campaign_id: string | null;
+        external_adset_id: string | null;
+        external_ad_id: string | null;
+        created_at: string;
+      }>("lead_sources", "lead_id,integration_id,source_type,campaign_asset_id,adset_asset_id,ad_asset_id,external_campaign_id,external_adset_id,external_ad_id,created_at"),
+      readTable<{ id: string; provider: string }>("integrations", "id,provider"),
+      readTable<{
+        id: string;
+        asset_type: "campaign" | "adset" | "ad";
+        name: string | null;
+        status: string | null;
+        metadata: Record<string, unknown> | null;
+      }>("marketing_assets", "id,asset_type,name,status,metadata"),
+      readTable<{
+        lead_id: string | null;
+        key: string;
+        value: string | null;
+        created_at: string;
+      }>("lead_attributes", "lead_id,key,value,created_at", 10000),
+    ]);
+
+    const leadMap = new Map(leads.map((lead) => [lead.id, lead]));
+    const attrsByLead = new Map<string, Map<string, string>>();
+    const rowsByAttribute = new Map<string, { ids: Set<string>; last?: string; source: string }>();
+
+    for (const attr of attributes) {
+      if (!attr.lead_id || !leadMap.has(attr.lead_id)) continue;
+      const cleaned = cleanAttribute(attr.value);
+      if (!cleaned) continue;
+      const leadAttrs = attrsByLead.get(attr.lead_id) ?? new Map<string, string>();
+      leadAttrs.set(attr.key, cleaned);
+      attrsByLead.set(attr.lead_id, leadAttrs);
+
+      if (["utm_campaign", "utm_source", "utm_medium", "form_name", "faixa_faturamento", "agendamento_status"].includes(attr.key)) {
+        const label = normalizeLabel(cleaned);
+        const bucketKey = `${attr.key}:${label}`;
+        const bucket = rowsByAttribute.get(bucketKey) ?? {
+          ids: new Set<string>(),
+          source: attr.key,
+        };
+        bucket.ids.add(attr.lead_id);
+        bucket.last = !bucket.last || attr.created_at > bucket.last ? attr.created_at : bucket.last;
+        rowsByAttribute.set(bucketKey, bucket);
+      }
+    }
+
+    const qualifiedIds = new Set(
+      leads
+        .filter((lead) => {
+          const attrs = attrsByLead.get(lead.id);
+          return lead.qualification || isTruthy(attrs?.get("lead_qualificado_"));
+        })
+        .map((lead) => lead.id),
+    );
+    const providerById = new Map(integrations.map((item) => [item.id, item.provider]));
+    const assetById = new Map(assets.map((asset) => [asset.id, asset]));
+    const rowsBySource = new Map<string, { ids: Set<string>; last?: string; provider: string }>();
+    const rowsByAsset = new Map<string, { ids: Set<string>; last?: string }>();
+
+    for (const source of sources) {
+      if (!source.lead_id || !leadMap.has(source.lead_id)) continue;
+
+      const provider = source.integration_id ? providerById.get(source.integration_id) : undefined;
+      const label = source.source_type || provider || "Fonte não classificada";
+      const sourceBucket = rowsBySource.get(label) ?? {
+        ids: new Set<string>(),
+        provider: provider || label,
+      };
+      sourceBucket.ids.add(source.lead_id);
+      sourceBucket.last = !sourceBucket.last || source.created_at > sourceBucket.last ? source.created_at : sourceBucket.last;
+      rowsBySource.set(label, sourceBucket);
+
+      for (const assetId of [source.campaign_asset_id, source.adset_asset_id, source.ad_asset_id]) {
+        if (!assetId) continue;
+        const assetBucket = rowsByAsset.get(assetId) ?? { ids: new Set<string>() };
+        assetBucket.ids.add(source.lead_id);
+        assetBucket.last = !assetBucket.last || source.created_at > assetBucket.last ? source.created_at : assetBucket.last;
+        rowsByAsset.set(assetId, assetBucket);
+      }
+    }
+
+    const trendsByDate = new Map<string, TrendRow>();
+    for (const lead of leads) {
+      const date = new Date(lead.created_at).toISOString().slice(0, 10);
+      const row = trendsByDate.get(date) ?? { date, leads: 0, qualified: 0 };
+      row.leads += 1;
+      row.qualified += qualifiedIds.has(lead.id) ? 1 : 0;
+      trendsByDate.set(date, row);
+    }
+
+    const campaigns = [...rowsByAsset.entries()]
+      .map(([assetId, bucket]) => {
+        const asset = assetById.get(assetId);
+        return buildRow(
+          assetId,
+          asString(asset?.name),
+          asset?.asset_type ?? "ad",
+          "Meta Ads",
+          bucket.ids,
+          qualifiedIds,
+          parseBudget(asset?.metadata?.daily_budget),
+          bucket.last,
+        );
+      })
+      .sort((a, b) => b.qualified - a.qualified || b.leads - a.leads)
+      .slice(0, 12);
+
+    const sourceRows = [...rowsBySource.entries()]
+      .map(([label, bucket]) =>
+        buildRow(label, label, "source", bucket.provider, bucket.ids, qualifiedIds, undefined, bucket.last),
+      )
+      .concat(
+        [...rowsByAttribute.entries()].map(([key, bucket]) => {
+          const [, label] = key.split(/:(.*)/s);
+          return buildRow(key, label, "source", bucket.source, bucket.ids, qualifiedIds, undefined, bucket.last);
+        }),
+      )
+      .sort((a, b) => b.qualified - a.qualified || b.leads - a.leads)
+      .slice(0, 30);
+
+    const totalLeads = leads.length;
+    const totalQualified = qualifiedIds.size;
+    const meta = sourceRows.find((row) => row.name === "meta_ads" || row.source === "META");
+    const best = [...sourceRows, ...campaigns].sort(
+      (a, b) => b.qualificationRate - a.qualificationRate || b.qualified - a.qualified,
+    )[0];
+
+    return {
+      updatedAt: new Date().toISOString(),
+      source: "live",
+      totals: {
+        leads: totalLeads,
+        attributedLeads: attrsByLead.size,
+        attributes: attributes.length,
+        qualified: totalQualified,
+        qualificationRate: pct(totalQualified, totalLeads),
+        activeCampaigns: assets.filter((asset) => asset.asset_type === "campaign" && asset.status === "ACTIVE").length,
+        activeAdsets: assets.filter((asset) => asset.asset_type === "adset" && asset.status === "ACTIVE").length,
+        activeAds: assets.filter((asset) => asset.asset_type === "ad" && asset.status === "ACTIVE").length,
+      },
+      funnel: [
+        { label: "Leads captados", value: totalLeads },
+        { label: "Leads qualificados", value: totalQualified },
+        { label: "Taxa de qualificação", value: pct(totalQualified, totalLeads) },
+      ],
+      trends: [...trendsByDate.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45),
+      sources: sourceRows,
+      campaigns,
+      insights: [
+        best ? `${best.name} lidera em taxa de qualificação (${best.qualificationRate}%).` : "Ainda não há volume suficiente para apontar uma vencedora.",
+        `${attrsByLead.size} leads têm atributos enriquecidos; esta passa a ser a camada principal de leitura do funil.`,
+        meta ? `Meta Ads concentra ${meta.leads} leads; acompanhe a qualidade antes de ampliar verba.` : "Meta Ads ainda não apareceu como fonte principal no recorte atual.",
+      ],
+    };
+  } catch {
+    return sampleDashboardData;
+  }
+}
+
+export const sampleDashboardData: DashboardData = {
+  updatedAt: "2026-05-10T22:15:00.000Z",
+  source: "sample",
+  totals: {
+    leads: 1149,
+    attributedLeads: 1149,
+    attributes: 6000,
+    qualified: 37,
+    qualificationRate: 3.2,
+    activeCampaigns: 1,
+    activeAdsets: 5,
+    activeAds: 12,
+  },
+  funnel: [
+    { label: "Leads captados", value: 1149 },
+    { label: "Leads qualificados", value: 37 },
+    { label: "Taxa de qualificação", value: 3.2 },
+  ],
+  trends: [
+    { date: "2026-04-01", leads: 18, qualified: 2 },
+    { date: "2026-04-08", leads: 30, qualified: 1 },
+    { date: "2026-04-15", leads: 46, qualified: 1 },
+    { date: "2026-04-22", leads: 73, qualified: 4 },
+    { date: "2026-04-29", leads: 58, qualified: 3 },
+    { date: "2026-05-06", leads: 68, qualified: 5 },
+    { date: "2026-05-10", leads: 31, qualified: 2 },
+  ],
+  sources: [
+    { id: "meta_ads", name: "Meta Ads", level: "source", source: "META", leads: 886, qualified: 22, qualificationRate: 2.5 },
+    { id: "site", name: "Site / formulários", level: "source", source: "MEUSITECONTABIL.COM.BR", leads: 131, qualified: 11, qualificationRate: 8.4 },
+    { id: "manychat", name: "Manychat", level: "source", source: "MANYCHAT", leads: 35, qualified: 18, qualificationRate: 51.4 },
+  ],
+  campaigns: [
+    { id: "120213129522200506", name: "[CA][25/11/25]- SITE - [LEAD] [ONGOING]", level: "campaign", source: "Meta Ads", leads: 886, qualified: 22, qualificationRate: 2.5 },
+    { id: "120246295582850506", name: "NOVO FORM. [CJ][21/04/26][INSTA][AMPLO LAL]", level: "adset", source: "Meta Ads", leads: 124, qualified: 7, qualificationRate: 5.6, dailyBudget: 10 },
+    { id: "120245793385070506", name: "[CJ][12/04/26][INSTA][TESTECRIATIVOS]", level: "adset", source: "Meta Ads", leads: 101, qualified: 4, qualificationRate: 4, dailyBudget: 30 },
+  ],
+  insights: [
+    "Manychat tem a maior taxa de qualificação no retrato inicial, apesar do volume menor.",
+    "Meta Ads concentra o volume, mas precisa ser comparado por qualidade antes de ampliar verba.",
+    "O próximo passo é cruzar custo real por campanha para decidir aumento de verba com base em CPL qualificado.",
+  ],
+};
