@@ -260,7 +260,7 @@ export async function getDashboardData(): Promise<DashboardData> {
       )
       .concat(
         [...rowsByAttribute.entries()].map(([key, bucket]) => {
-          const [, label] = key.split(/:(.*)/s);
+          const label = key.slice(key.indexOf(":") + 1);
           return buildRow(key, label, "source", bucket.source, bucket.ids, qualifiedIds, undefined, bucket.last);
         }),
       )
