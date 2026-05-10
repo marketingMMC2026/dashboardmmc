@@ -8,6 +8,7 @@ type Props = {
 };
 
 type ColumnKey =
+  | "createdAt"
   | "name"
   | "contact"
   | "source"
@@ -30,6 +31,7 @@ const currency = new Intl.NumberFormat("pt-BR", {
 const number = new Intl.NumberFormat("pt-BR");
 
 const leadColumns: { key: ColumnKey; label: string }[] = [
+  { key: "createdAt", label: "Cadastro" },
   { key: "name", label: "Lead" },
   { key: "contact", label: "Contato" },
   { key: "source", label: "Origem" },
@@ -46,6 +48,7 @@ const leadColumns: { key: ColumnKey; label: string }[] = [
 ];
 
 const defaultLeadColumns: ColumnKey[] = [
+  "createdAt",
   "name",
   "contact",
   "source",
@@ -60,6 +63,11 @@ const defaultLeadColumns: ColumnKey[] = [
 function formatDate(value?: string) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
+}
+
+function formatFullDate(value?: string) {
+  if (!value) return "-";
+  return new Intl.DateTimeFormat("pt-BR").format(new Date(value));
 }
 
 function boolLabel(value: boolean | null) {
@@ -159,6 +167,8 @@ function RankingTable({ rows }: { rows: CampaignRow[] }) {
 }
 
 function LeadCell({ lead, column }: { lead: LeadRow; column: ColumnKey }) {
+  if (column === "createdAt") return <span>{formatFullDate(lead.createdAt)}</span>;
+
   if (column === "contact") {
     return (
       <div className="stackCell">
@@ -176,16 +186,54 @@ function LeadCell({ lead, column }: { lead: LeadRow; column: ColumnKey }) {
   return <span className={column === "summary" ? "clampCell" : ""}>{typeof value === "string" ? value : "-"}</span>;
 }
 
+function MultiFilter({
+  label,
+  options,
+  selected,
+  onChange,
+}: {
+  label: string;
+  options: string[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
+  function toggle(value: string) {
+    onChange(selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value]);
+  }
+
+  return (
+    <details className="multiFilter">
+      <summary>
+        {label}
+        <span>{selected.length ? `${selected.length} selecionado${selected.length > 1 ? "s" : ""}` : "Todos"}</span>
+      </summary>
+      <div className="multiFilterList">
+        <button type="button" onClick={() => onChange([])}>Limpar</button>
+        {options.map((option) => (
+          <label key={option}>
+            <input type="checkbox" checked={selected.includes(option)} onChange={() => toggle(option)} />
+            {option}
+          </label>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 function LeadsView({ data }: { data: DashboardData }) {
   const [leadView, setLeadView] = useState<"all" | "hot" | "low">("all");
   const [search, setSearch] = useState("");
   const [period, setPeriod] = useState("30");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
   const [source, setSource] = useState("all");
-  const [campaign, setCampaign] = useState("all");
+  const [campaigns, setCampaigns] = useState<string[]>([]);
+  const [adsets, setAdsets] = useState<string[]>([]);
+  const [ads, setAds] = useState<string[]>([]);
   const [qualified, setQualified] = useState("all");
   const [scheduled, setScheduled] = useState("all");
   const [hasOffice, setHasOffice] = useState("all");
-  const [revenue, setRevenue] = useState("all");
+  const [revenues, setRevenues] = useState<string[]>([]);
   const [pageSize, setPageSize] = useState(50);
   const [page, setPage] = useState(1);
   const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(defaultLeadColumns);
@@ -193,11 +241,15 @@ function LeadsView({ data }: { data: DashboardData }) {
 
   const uniqueSources = useMemo(() => [...new Set(data.leads.map((lead) => lead.source).filter(Boolean))].sort(), [data.leads]);
   const uniqueCampaigns = useMemo(() => [...new Set(data.leads.map((lead) => lead.campaign).filter((item) => item && item !== "-"))].sort(), [data.leads]);
+  const uniqueAdsets = useMemo(() => [...new Set(data.leads.map((lead) => lead.adset).filter((item) => item && item !== "-"))].sort(), [data.leads]);
+  const uniqueAds = useMemo(() => [...new Set(data.leads.map((lead) => lead.ad).filter((item) => item && item !== "-"))].sort(), [data.leads]);
   const uniqueRevenue = useMemo(() => [...new Set(data.leads.map((lead) => lead.revenueRange).filter((item) => item && item !== "-"))].sort(), [data.leads]);
 
   const filteredLeads = useMemo(() => {
     const now = Date.now();
-    const maxAge = period === "all" ? null : Number(period) * 24 * 60 * 60 * 1000;
+    const maxAge = period === "all" || period === "custom" ? null : Number(period) * 24 * 60 * 60 * 1000;
+    const startDate = customStart ? new Date(`${customStart}T00:00:00`).getTime() : null;
+    const endDate = customEnd ? new Date(`${customEnd}T23:59:59`).getTime() : null;
     const query = search.trim().toLowerCase();
 
     return data.leads.filter((lead) => {
@@ -206,16 +258,20 @@ function LeadsView({ data }: { data: DashboardData }) {
 
       if (leadView !== "all" && lead.quality !== leadView) return false;
       if (maxAge && now - createdAt > maxAge) return false;
+      if (period === "custom" && startDate && createdAt < startDate) return false;
+      if (period === "custom" && endDate && createdAt > endDate) return false;
       if (query && !text.includes(query)) return false;
       if (source !== "all" && lead.source !== source) return false;
-      if (campaign !== "all" && lead.campaign !== campaign) return false;
+      if (campaigns.length && !campaigns.includes(lead.campaign)) return false;
+      if (adsets.length && !adsets.includes(lead.adset)) return false;
+      if (ads.length && !ads.includes(lead.ad)) return false;
       if (qualified !== "all" && String(lead.qualified) !== qualified) return false;
       if (scheduled !== "all" && String(lead.scheduled) !== scheduled) return false;
       if (hasOffice !== "all" && String(lead.hasOffice) !== hasOffice) return false;
-      if (revenue !== "all" && lead.revenueRange !== revenue) return false;
+      if (revenues.length && !revenues.includes(lead.revenueRange)) return false;
       return true;
     });
-  }, [campaign, data.leads, hasOffice, leadView, period, qualified, revenue, scheduled, search, source]);
+  }, [ads, adsets, campaigns, customEnd, customStart, data.leads, hasOffice, leadView, period, qualified, revenues, scheduled, search, source]);
 
   const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -223,6 +279,9 @@ function LeadsView({ data }: { data: DashboardData }) {
   const hotLeads = filteredLeads.filter((lead) => lead.quality === "hot").length;
   const qualifiedLeads = filteredLeads.filter((lead) => lead.qualified).length;
   const scheduledLeads = filteredLeads.filter((lead) => lead.scheduled).length;
+  const hotRate = filteredLeads.length ? (hotLeads / filteredLeads.length) * 100 : 0;
+  const qualifiedRate = filteredLeads.length ? (qualifiedLeads / filteredLeads.length) * 100 : 0;
+  const scheduledRate = filteredLeads.length ? (scheduledLeads / filteredLeads.length) * 100 : 0;
 
   function toggleColumn(column: ColumnKey) {
     setVisibleColumns((current) => {
@@ -235,9 +294,9 @@ function LeadsView({ data }: { data: DashboardData }) {
     <section className="leadsLayout">
       <div className="leadSummaryGrid">
         <MetricCard label="Leads filtrados" value={number.format(filteredLeads.length)} detail="Resultado dos filtros atuais" />
-        <MetricCard label="Leads quentes" value={number.format(hotLeads)} detail="Qualificados, agendados ou com sinais fortes" tone="warn" />
-        <MetricCard label="Qualificados" value={number.format(qualifiedLeads)} detail="Marcados no funil comercial" tone="good" />
-        <MetricCard label="Agendados" value={number.format(scheduledLeads)} detail="Com status de agendamento" />
+        <MetricCard label="Leads quentes" value={number.format(hotLeads)} detail={`${hotRate.toFixed(1)}% dos filtrados`} tone="warn" />
+        <MetricCard label="Qualificados" value={number.format(qualifiedLeads)} detail={`${qualifiedRate.toFixed(1)}% dos filtrados`} tone="good" />
+        <MetricCard label="Agendados" value={number.format(scheduledLeads)} detail={`${scheduledRate.toFixed(1)}% dos filtrados`} />
       </div>
 
       <section className="panel tablePanel">
@@ -265,15 +324,18 @@ function LeadsView({ data }: { data: DashboardData }) {
             <option value="7">Últimos 7 dias</option>
             <option value="30">Últimos 30 dias</option>
             <option value="90">Últimos 90 dias</option>
+            <option value="custom">Personalizado</option>
             <option value="all">Todo histórico</option>
           </select>
+          {period === "custom" ? (
+            <>
+              <input type="date" value={customStart} onChange={(event) => { setCustomStart(event.target.value); setPage(1); }} />
+              <input type="date" value={customEnd} onChange={(event) => { setCustomEnd(event.target.value); setPage(1); }} />
+            </>
+          ) : null}
           <select value={source} onChange={(event) => { setSource(event.target.value); setPage(1); }}>
             <option value="all">Todas as origens</option>
             {uniqueSources.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
-          <select value={campaign} onChange={(event) => { setCampaign(event.target.value); setPage(1); }}>
-            <option value="all">Todas as campanhas</option>
-            {uniqueCampaigns.map((item) => <option key={item} value={item}>{item}</option>)}
           </select>
           <select value={qualified} onChange={(event) => { setQualified(event.target.value); setPage(1); }}>
             <option value="all">Qualificação</option>
@@ -291,10 +353,13 @@ function LeadsView({ data }: { data: DashboardData }) {
             <option value="false">Não</option>
             <option value="null">Sem informação</option>
           </select>
-          <select value={revenue} onChange={(event) => { setRevenue(event.target.value); setPage(1); }}>
-            <option value="all">Todas as faixas</option>
-            {uniqueRevenue.map((item) => <option key={item} value={item}>{item}</option>)}
-          </select>
+        </div>
+
+        <div className="multiFiltersGrid">
+          <MultiFilter label="Campanhas" options={uniqueCampaigns} selected={campaigns} onChange={(next) => { setCampaigns(next); setPage(1); }} />
+          <MultiFilter label="Conjuntos" options={uniqueAdsets} selected={adsets} onChange={(next) => { setAdsets(next); setPage(1); }} />
+          <MultiFilter label="Anúncios" options={uniqueAds} selected={ads} onChange={(next) => { setAds(next); setPage(1); }} />
+          <MultiFilter label="Faturamento" options={uniqueRevenue} selected={revenues} onChange={(next) => { setRevenues(next); setPage(1); }} />
         </div>
 
         <details className="columnConfig">
