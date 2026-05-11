@@ -197,6 +197,52 @@ function buildRankingRows(leads: LeadRow[], level: CampaignRow["level"]): Campai
     .slice(0, 30);
 }
 
+function csvEscape(value: unknown) {
+  const text = String(value ?? "");
+  return `"${text.replaceAll('"', '""')}"`;
+}
+
+function downloadLeadsCsv(leads: LeadRow[]) {
+  const baseColumns: { key: string; label: string; value: (lead: LeadRow) => unknown }[] = [
+    { key: "id", label: "id", value: (lead) => lead.id },
+    { key: "createdAt", label: "data_cadastro", value: (lead) => formatFullDate(lead.createdAt) },
+    { key: "name", label: "nome", value: (lead) => lead.name },
+    { key: "phone", label: "telefone", value: (lead) => lead.phone },
+    { key: "email", label: "email", value: (lead) => lead.email },
+    { key: "source", label: "origem", value: (lead) => lead.source },
+    { key: "campaign", label: "campanha", value: (lead) => lead.campaign },
+    { key: "adset", label: "conjunto", value: (lead) => lead.adset },
+    { key: "ad", label: "anuncio", value: (lead) => lead.ad },
+    { key: "form", label: "formulario", value: (lead) => lead.form },
+    { key: "qualified", label: "qualificado", value: (lead) => boolLabel(lead.qualified) },
+    { key: "scheduled", label: "agendado", value: (lead) => boolLabel(lead.scheduled) },
+    { key: "hasOffice", label: "tem_escritorio", value: (lead) => boolLabel(lead.hasOffice) },
+    { key: "revenueRange", label: "faturamento", value: (lead) => lead.revenueRange },
+    { key: "scheduleStatus", label: "status_agendamento", value: (lead) => lead.scheduleStatus },
+    { key: "quality", label: "qualidade", value: (lead) => lead.quality },
+    { key: "summary", label: "resumo_ia", value: (lead) => lead.summary },
+  ];
+  const attributeKeys = [...new Set(leads.flatMap((lead) => lead.attributes.map((attr) => attr.key)))].sort();
+  const header = [...baseColumns.map((column) => column.label), ...attributeKeys.map((key) => `atributo_${key}`)];
+  const rows = leads.map((lead) => {
+    const attrs = new Map(lead.attributes.map((attr) => [attr.key, attr.value]));
+    return [
+      ...baseColumns.map((column) => column.value(lead)),
+      ...attributeKeys.map((key) => attrs.get(key) ?? ""),
+    ];
+  });
+  const csv = [header, ...rows].map((row) => row.map(csvEscape).join(";")).join("\n");
+  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `leads-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function Bar({ value, max }: { value: number; max: number }) {
   const width = max > 0 ? Math.max(4, (value / max) * 100) : 0;
   return (
@@ -511,6 +557,13 @@ function LeadsView({ data }: { data: DashboardData }) {
           </div>
         </details>
 
+        <div className="exportBar">
+          <span>Exporta os leads filtrados com todos os campos de cadastro e atributos disponíveis.</span>
+          <button className="smallButton" onClick={() => downloadLeadsCsv(filteredLeads)} disabled={!filteredLeads.length}>
+            Exportar CSV
+          </button>
+        </div>
+
         <div className="tableWrap">
           <table className="leadsTable">
             <thead>
@@ -589,6 +642,10 @@ function DashboardOverview({ initialData }: Props) {
   const [period, setPeriod] = useState<PeriodValue>("30");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
+  const [analysisMode, setAnalysisMode] = useState("scale");
+  const [analysisPrompt, setAnalysisPrompt] = useState("");
+  const [analysis, setAnalysis] = useState("");
+  const [analysisStatus, setAnalysisStatus] = useState<"idle" | "loading" | "error">("idle");
 
   const currentRange = useMemo(() => buildPeriodRange(period, customStart, customEnd), [customEnd, customStart, period]);
   const lastRange = useMemo(() => previousRange(currentRange), [currentRange]);
@@ -620,6 +677,39 @@ function DashboardOverview({ initialData }: Props) {
   const attentionRow = [...rows]
     .filter((row) => row.leads >= 5)
     .sort((a, b) => a.qualificationRate - b.qualificationRate || b.leads - a.leads)[0];
+
+  async function runAiAnalysis() {
+    setAnalysisStatus("loading");
+    setAnalysis("");
+
+    try {
+      const response = await fetch("/api/analysis", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          mode: analysisMode,
+          customPrompt: analysisPrompt,
+          period: currentRange.label,
+          summary,
+          previousSummary,
+          ranking: rows.slice(0, 12),
+          trend: trendRows.slice(-14),
+          decision: {
+            volumeWinner,
+            qualityWinner,
+            attentionRow,
+          },
+        }),
+      });
+      const payload = (await response.json()) as { analysis?: string; error?: string };
+      if (!response.ok) throw new Error(payload.error || "Não foi possível gerar a análise.");
+      setAnalysis(payload.analysis || "");
+      setAnalysisStatus("idle");
+    } catch (error) {
+      setAnalysisStatus("error");
+      setAnalysis(error instanceof Error ? error.message : "Não foi possível gerar a análise.");
+    }
+  }
 
   return (
     <>
@@ -722,6 +812,33 @@ function DashboardOverview({ initialData }: Props) {
           <span>Ponto de atenção</span>
           <b>{attentionRow?.name ?? "Sem dados"}</b>
           <small>{attentionRow ? `${attentionRow.qualificationRate.toFixed(1)}% com ${number.format(attentionRow.leads)} leads` : "Nenhum item com volume mínimo"}</small>
+        </div>
+      </section>
+
+      <section className="panel aiPanel">
+        <div className="panelHead tools">
+          <div>
+            <p className="eyebrow">Análise por IA</p>
+            <h3>Leitura estratégica do período</h3>
+          </div>
+          <button className="smallButton" onClick={runAiAnalysis} disabled={analysisStatus === "loading" || !summary.total}>
+            {analysisStatus === "loading" ? "Analisando..." : "Gerar análise"}
+          </button>
+        </div>
+        <div className="aiControls">
+          <select value={analysisMode} onChange={(event) => setAnalysisMode(event.target.value)}>
+            <option value="scale">Onde aumentar verba</option>
+            <option value="diagnosis">Diagnóstico de queda ou gargalo</option>
+            <option value="creative">Campanha, conjunto e anúncio</option>
+          </select>
+          <textarea
+            value={analysisPrompt}
+            onChange={(event) => setAnalysisPrompt(event.target.value)}
+            placeholder="Pergunte algo específico para a IA analisar neste período"
+          />
+        </div>
+        <div className={`aiResult ${analysisStatus === "error" ? "error" : ""}`}>
+          {analysis || "A análise vai considerar o período selecionado, o funil, o comparativo anterior e o ranking atual."}
         </div>
       </section>
 

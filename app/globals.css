@@ -32,7 +32,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -405,7 +406,8 @@ h3 {
 }
 
 input,
-select {
+select,
+textarea {
   width: 220px;
   height: 40px;
   border: 1px solid var(--line);
@@ -417,7 +419,8 @@ select {
 }
 
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   border-color: var(--teal);
 }
 
@@ -621,6 +624,60 @@ td {
   height: 16px;
 }
 
+.exportBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbf9;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.aiPanel {
+  margin-top: 18px;
+}
+
+.aiControls {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.35fr) minmax(0, 0.65fr);
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.aiControls select,
+.aiControls textarea {
+  width: 100%;
+}
+
+textarea {
+  min-height: 92px;
+  resize: vertical;
+  padding: 10px 12px;
+}
+
+.aiResult {
+  min-height: 128px;
+  white-space: pre-wrap;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f3f6f3;
+  color: var(--text);
+  line-height: 1.55;
+}
+
+.aiResult.error {
+  border-color: rgba(177, 61, 58, 0.25);
+  background: rgba(177, 61, 58, 0.08);
+  color: var(--red);
+}
+
 .leadsTable {
   min-width: 1180px;
 }
@@ -806,6 +863,7 @@ td {
   .filterPanel,
   .tools,
   .controls,
+  .exportBar,
   .paginationBar,
   .paginationBar div {
     align-items: stretch;
@@ -814,6 +872,7 @@ td {
 
   .decisionPanel,
   .analysisGrid,
+  .aiControls,
   .metricsGrid {
     grid-template-columns: 1fr;
   }
