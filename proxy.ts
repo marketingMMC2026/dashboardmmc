@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 export function proxy(request: NextRequest) {
+  if (request.nextUrl.pathname === "/api/media-metrics") {
+    return NextResponse.next();
+  }
+
   const password = process.env.DASHBOARD_PASSWORD;
   const user = process.env.DASHBOARD_USER || "admin";
 
