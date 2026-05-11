@@ -181,6 +181,71 @@ h3 {
   margin: 18px 0;
 }
 
+.filterPanel,
+.filtersInline,
+.decisionGrid,
+.comparisonPanel {
+  display: flex;
+  align-items: center;
+}
+
+.filterPanel {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.filtersInline {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.decisionGrid,
+.comparisonPanel {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0;
+}
+
+.decisionGrid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.comparisonPanel {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.decisionCard,
+.comparisonPanel div {
+  min-height: 116px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 12px 38px rgba(23, 32, 37, 0.045);
+}
+
+.decisionCard span,
+.decisionCard small,
+.comparisonPanel span,
+.comparisonPanel small {
+  display: block;
+  color: var(--muted);
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.decisionCard b,
+.comparisonPanel b {
+  display: block;
+  overflow: hidden;
+  margin: 10px 0;
+  font-size: 1.08rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .metric,
 .panel {
   border: 1px solid var(--line);
@@ -300,6 +365,12 @@ h3 {
 
 .funnelStep span {
   color: var(--muted);
+  font-weight: 700;
+}
+
+.funnelStep small {
+  color: var(--muted);
+  font-size: 0.82rem;
   font-weight: 700;
 }
 
@@ -732,6 +803,7 @@ td {
 
   .topbar,
   .panelHead,
+  .filterPanel,
   .tools,
   .controls,
   .paginationBar,

@@ -60,6 +60,9 @@ const defaultLeadColumns: ColumnKey[] = [
   "form",
 ];
 
+type PeriodValue = "7" | "30" | "90" | "custom" | "all";
+type DateRange = { start: number | null; end: number | null; label: string };
+
 function formatDate(value?: string) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
@@ -73,6 +76,125 @@ function formatFullDate(value?: string) {
 function boolLabel(value: boolean | null) {
   if (value === null) return "-";
   return value ? "Sim" : "Não";
+}
+
+function pct(part: number, total: number) {
+  return total > 0 ? (part / total) * 100 : 0;
+}
+
+function metricDelta(current: number, previous: number, suffix = "") {
+  const diff = current - previous;
+  const signal = diff > 0 ? "+" : "";
+  return `${signal}${diff.toFixed(1)}${suffix} vs período anterior`;
+}
+
+function metricCountDelta(current: number, previous: number) {
+  const diff = current - previous;
+  const signal = diff > 0 ? "+" : "";
+  return `${signal}${number.format(diff)} vs período anterior`;
+}
+
+function buildPeriodRange(period: PeriodValue, customStart: string, customEnd: string): DateRange {
+  if (period === "all") return { start: null, end: null, label: "Todo histórico" };
+
+  if (period === "custom") {
+    return {
+      start: customStart ? new Date(`${customStart}T00:00:00`).getTime() : null,
+      end: customEnd ? new Date(`${customEnd}T23:59:59`).getTime() : null,
+      label: "Período personalizado",
+    };
+  }
+
+  const days = Number(period);
+  const end = Date.now();
+  return {
+    start: end - days * 24 * 60 * 60 * 1000,
+    end,
+    label: `Últimos ${days} dias`,
+  };
+}
+
+function previousRange(range: DateRange): DateRange {
+  if (!range.start || !range.end) return { start: null, end: null, label: "Sem comparação" };
+  const duration = range.end - range.start;
+  return {
+    start: range.start - duration,
+    end: range.start - 1,
+    label: "Período anterior",
+  };
+}
+
+function inRange(date: string, range: DateRange) {
+  const time = new Date(date).getTime();
+  if (range.start && time < range.start) return false;
+  if (range.end && time > range.end) return false;
+  return true;
+}
+
+function summarizeLeads(leads: LeadRow[]) {
+  const hot = leads.filter((lead) => lead.quality === "hot").length;
+  const qualified = leads.filter((lead) => lead.qualified).length;
+  const scheduled = leads.filter((lead) => lead.scheduled).length;
+  const withOffice = leads.filter((lead) => lead.hasOffice === true).length;
+
+  return {
+    total: leads.length,
+    hot,
+    qualified,
+    scheduled,
+    withOffice,
+    hotRate: pct(hot, leads.length),
+    qualificationRate: pct(qualified, leads.length),
+    scheduledRate: pct(scheduled, leads.length),
+    officeRate: pct(withOffice, leads.length),
+  };
+}
+
+function buildTrendRows(leads: LeadRow[]) {
+  const rows = new Map<string, { date: string; leads: number; qualified: number }>();
+  for (const lead of leads) {
+    const date = new Date(lead.createdAt).toISOString().slice(0, 10);
+    const row = rows.get(date) ?? { date, leads: 0, qualified: 0 };
+    row.leads += 1;
+    row.qualified += lead.qualified ? 1 : 0;
+    rows.set(date, row);
+  }
+  return [...rows.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45);
+}
+
+function buildRankingRows(leads: LeadRow[], level: CampaignRow["level"]): CampaignRow[] {
+  const groups = new Map<string, { ids: Set<string>; source: string; lastLeadAt?: string; qualified: number }>();
+
+  for (const lead of leads) {
+    const name =
+      level === "source" ? lead.source :
+      level === "campaign" ? lead.campaign :
+      level === "adset" ? lead.adset :
+      lead.ad;
+
+    if (!name || name === "-") continue;
+
+    const key = `${level}:${name}`;
+    const group = groups.get(key) ?? { ids: new Set<string>(), source: lead.source, qualified: 0 };
+    if (!group.ids.has(lead.id) && lead.qualified) group.qualified += 1;
+    group.ids.add(lead.id);
+    group.lastLeadAt = !group.lastLeadAt || lead.createdAt > group.lastLeadAt ? lead.createdAt : group.lastLeadAt;
+    groups.set(key, group);
+  }
+
+  return [...groups.entries()]
+    .map(([key, group]) => ({
+      id: key,
+      name: key.slice(key.indexOf(":") + 1),
+      level,
+      source: group.source,
+      leads: group.ids.size,
+      qualified: group.qualified,
+      qualificationRate: pct(group.qualified, group.ids.size),
+      lastLeadAt: group.lastLeadAt,
+    }))
+    .sort((a, b) => b.qualified - a.qualified || b.qualificationRate - a.qualificationRate || b.leads - a.leads)
+    .slice(0, 30);
 }
 
 function Bar({ value, max }: { value: number; max: number }) {
@@ -223,7 +345,7 @@ function MultiFilter({
 function LeadsView({ data }: { data: DashboardData }) {
   const [leadView, setLeadView] = useState<"all" | "hot" | "low">("all");
   const [search, setSearch] = useState("");
-  const [period, setPeriod] = useState("30");
+  const [period, setPeriod] = useState<PeriodValue>("30");
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [source, setSource] = useState("all");
@@ -245,43 +367,41 @@ function LeadsView({ data }: { data: DashboardData }) {
   const uniqueAds = useMemo(() => [...new Set(data.leads.map((lead) => lead.ad).filter((item) => item && item !== "-"))].sort(), [data.leads]);
   const uniqueRevenue = useMemo(() => [...new Set(data.leads.map((lead) => lead.revenueRange).filter((item) => item && item !== "-"))].sort(), [data.leads]);
 
-  const filteredLeads = useMemo(() => {
-    const now = Date.now();
-    const maxAge = period === "all" || period === "custom" ? null : Number(period) * 24 * 60 * 60 * 1000;
-    const startDate = customStart ? new Date(`${customStart}T00:00:00`).getTime() : null;
-    const endDate = customEnd ? new Date(`${customEnd}T23:59:59`).getTime() : null;
+  const currentRange = useMemo(() => buildPeriodRange(period, customStart, customEnd), [customEnd, customStart, period]);
+  const lastRange = useMemo(() => previousRange(currentRange), [currentRange]);
+
+  const applyLeadFilters = (lead: LeadRow, range: DateRange) => {
     const query = search.trim().toLowerCase();
+    const text = `${lead.name} ${lead.phone} ${lead.email} ${lead.source} ${lead.campaign} ${lead.adset} ${lead.ad} ${lead.form} ${lead.summary}`.toLowerCase();
 
-    return data.leads.filter((lead) => {
-      const createdAt = new Date(lead.createdAt).getTime();
-      const text = `${lead.name} ${lead.phone} ${lead.email} ${lead.source} ${lead.campaign} ${lead.form} ${lead.summary}`.toLowerCase();
+    if (!inRange(lead.createdAt, range)) return false;
+    if (leadView !== "all" && lead.quality !== leadView) return false;
+    if (query && !text.includes(query)) return false;
+    if (source !== "all" && lead.source !== source) return false;
+    if (campaigns.length && !campaigns.includes(lead.campaign)) return false;
+    if (adsets.length && !adsets.includes(lead.adset)) return false;
+    if (ads.length && !ads.includes(lead.ad)) return false;
+    if (qualified !== "all" && String(lead.qualified) !== qualified) return false;
+    if (scheduled !== "all" && String(lead.scheduled) !== scheduled) return false;
+    if (hasOffice !== "all" && String(lead.hasOffice) !== hasOffice) return false;
+    if (revenues.length && !revenues.includes(lead.revenueRange)) return false;
+    return true;
+  };
 
-      if (leadView !== "all" && lead.quality !== leadView) return false;
-      if (maxAge && now - createdAt > maxAge) return false;
-      if (period === "custom" && startDate && createdAt < startDate) return false;
-      if (period === "custom" && endDate && createdAt > endDate) return false;
-      if (query && !text.includes(query)) return false;
-      if (source !== "all" && lead.source !== source) return false;
-      if (campaigns.length && !campaigns.includes(lead.campaign)) return false;
-      if (adsets.length && !adsets.includes(lead.adset)) return false;
-      if (ads.length && !ads.includes(lead.ad)) return false;
-      if (qualified !== "all" && String(lead.qualified) !== qualified) return false;
-      if (scheduled !== "all" && String(lead.scheduled) !== scheduled) return false;
-      if (hasOffice !== "all" && String(lead.hasOffice) !== hasOffice) return false;
-      if (revenues.length && !revenues.includes(lead.revenueRange)) return false;
-      return true;
-    });
-  }, [ads, adsets, campaigns, customEnd, customStart, data.leads, hasOffice, leadView, period, qualified, revenues, scheduled, search, source]);
+  const filteredLeads = useMemo(
+    () => data.leads.filter((lead) => applyLeadFilters(lead, currentRange)),
+    [ads, adsets, campaigns, currentRange, data.leads, hasOffice, leadView, qualified, revenues, scheduled, search, source],
+  );
+  const previousLeads = useMemo(
+    () => data.leads.filter((lead) => applyLeadFilters(lead, lastRange)),
+    [ads, adsets, campaigns, data.leads, hasOffice, lastRange, leadView, qualified, revenues, scheduled, search, source],
+  );
 
   const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const pagedLeads = filteredLeads.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const hotLeads = filteredLeads.filter((lead) => lead.quality === "hot").length;
-  const qualifiedLeads = filteredLeads.filter((lead) => lead.qualified).length;
-  const scheduledLeads = filteredLeads.filter((lead) => lead.scheduled).length;
-  const hotRate = filteredLeads.length ? (hotLeads / filteredLeads.length) * 100 : 0;
-  const qualifiedRate = filteredLeads.length ? (qualifiedLeads / filteredLeads.length) * 100 : 0;
-  const scheduledRate = filteredLeads.length ? (scheduledLeads / filteredLeads.length) * 100 : 0;
+  const summary = summarizeLeads(filteredLeads);
+  const previousSummary = summarizeLeads(previousLeads);
 
   function toggleColumn(column: ColumnKey) {
     setVisibleColumns((current) => {
@@ -293,11 +413,24 @@ function LeadsView({ data }: { data: DashboardData }) {
   return (
     <section className="leadsLayout">
       <div className="leadSummaryGrid">
-        <MetricCard label="Leads filtrados" value={number.format(filteredLeads.length)} detail="Resultado dos filtros atuais" />
-        <MetricCard label="Leads quentes" value={number.format(hotLeads)} detail={`${hotRate.toFixed(1)}% dos filtrados`} tone="warn" />
-        <MetricCard label="Qualificados" value={number.format(qualifiedLeads)} detail={`${qualifiedRate.toFixed(1)}% dos filtrados`} tone="good" />
-        <MetricCard label="Agendados" value={number.format(scheduledLeads)} detail={`${scheduledRate.toFixed(1)}% dos filtrados`} />
+        <MetricCard label="Leads filtrados" value={number.format(summary.total)} detail={metricCountDelta(summary.total, previousSummary.total)} />
+        <MetricCard label="Leads quentes" value={number.format(summary.hot)} detail={`${summary.hotRate.toFixed(1)}% · ${metricDelta(summary.hotRate, previousSummary.hotRate, " p.p.")}`} tone="warn" />
+        <MetricCard label="Qualificados" value={number.format(summary.qualified)} detail={`${summary.qualificationRate.toFixed(1)}% · ${metricDelta(summary.qualificationRate, previousSummary.qualificationRate, " p.p.")}`} tone="good" />
+        <MetricCard label="Agendados" value={number.format(summary.scheduled)} detail={`${summary.scheduledRate.toFixed(1)}% · ${metricDelta(summary.scheduledRate, previousSummary.scheduledRate, " p.p.")}`} />
       </div>
+
+      <section className="comparisonPanel">
+        <div>
+          <span>Atual</span>
+          <b>{number.format(summary.total)} leads</b>
+          <small>{summary.qualificationRate.toFixed(1)}% qualificados · {summary.scheduledRate.toFixed(1)}% agendados</small>
+        </div>
+        <div>
+          <span>Período anterior</span>
+          <b>{number.format(previousSummary.total)} leads</b>
+          <small>{previousSummary.qualificationRate.toFixed(1)}% qualificados · {previousSummary.scheduledRate.toFixed(1)}% agendados</small>
+        </div>
+      </section>
 
       <section className="panel tablePanel">
         <div className="panelHead tools">
@@ -320,7 +453,7 @@ function LeadsView({ data }: { data: DashboardData }) {
 
         <div className="filtersGrid">
           <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(1); }} placeholder="Buscar lead" />
-          <select value={period} onChange={(event) => { setPeriod(event.target.value); setPage(1); }}>
+          <select value={period} onChange={(event) => { setPeriod(event.target.value as PeriodValue); setPage(1); }}>
             <option value="7">Últimos 7 dias</option>
             <option value="30">Últimos 30 dias</option>
             <option value="90">Últimos 90 dias</option>
@@ -451,58 +584,83 @@ function LeadsView({ data }: { data: DashboardData }) {
 }
 
 function DashboardOverview({ initialData }: Props) {
-  const [view, setView] = useState<"campaigns" | "sources">("campaigns");
+  const [view, setView] = useState<CampaignRow["level"]>("campaign");
   const [query, setQuery] = useState("");
+  const [period, setPeriod] = useState<PeriodValue>("30");
+  const [customStart, setCustomStart] = useState("");
+  const [customEnd, setCustomEnd] = useState("");
 
-  const rows = view === "campaigns" ? initialData.campaigns : initialData.sources;
+  const currentRange = useMemo(() => buildPeriodRange(period, customStart, customEnd), [customEnd, customStart, period]);
+  const lastRange = useMemo(() => previousRange(currentRange), [currentRange]);
+  const currentLeads = useMemo(() => initialData.leads.filter((lead) => inRange(lead.createdAt, currentRange)), [currentRange, initialData.leads]);
+  const previousLeads = useMemo(() => initialData.leads.filter((lead) => inRange(lead.createdAt, lastRange)), [initialData.leads, lastRange]);
+  const summary = summarizeLeads(currentLeads);
+  const previousSummary = summarizeLeads(previousLeads);
+  const trendRows = buildTrendRows(currentLeads);
+  const rows = buildRankingRows(currentLeads, view);
   const filteredRows = useMemo(() => {
     const search = query.trim().toLowerCase();
     if (!search) return rows;
     return rows.filter((row) => `${row.name} ${row.source} ${row.level}`.toLowerCase().includes(search));
   }, [query, rows]);
 
-  const topRow = [...initialData.sources, ...initialData.campaigns].sort(
-    (a, b) => b.qualificationRate - a.qualificationRate || b.qualified - a.qualified,
-  )[0];
+  const topRow = [...buildRankingRows(currentLeads, "campaign"), ...buildRankingRows(currentLeads, "adset"), ...buildRankingRows(currentLeads, "ad")]
+    .filter((row) => row.leads >= 2)
+    .sort((a, b) => b.qualificationRate - a.qualificationRate || b.qualified - a.qualified)[0];
+
+  const funnel = [
+    { label: "Leads captados", value: summary.total },
+    { label: "Leads quentes", value: summary.hot },
+    { label: "Qualificados", value: summary.qualified },
+    { label: "Agendados", value: summary.scheduled },
+  ];
+  const levelLabel = view === "campaign" ? "Campanhas" : view === "adset" ? "Conjuntos" : view === "ad" ? "Anúncios" : "Fontes";
+  const volumeWinner = [...rows].sort((a, b) => b.leads - a.leads)[0];
+  const qualityWinner = rows.filter((row) => row.leads >= 2).sort((a, b) => b.qualificationRate - a.qualificationRate)[0];
+  const attentionRow = [...rows]
+    .filter((row) => row.leads >= 5)
+    .sort((a, b) => a.qualificationRate - b.qualificationRate || b.leads - a.leads)[0];
 
   return (
     <>
-      <section className="decisionPanel">
+      <section className="panel filterPanel">
         <div>
-          <p className="eyebrow">Decisão principal</p>
-          <h2>{topRow ? `Prioridade: ${topRow.name}` : "Aguardando dados suficientes"}</h2>
-          <p>
-            Compare volume com taxa de qualificação antes de duplicar campanha. Aumente verba quando a campanha mantiver
-            qualidade e consistência diária, não apenas pico de leads.
-          </p>
+          <p className="eyebrow">Período de análise</p>
+          <h3>{currentRange.label}</h3>
         </div>
-        <div className="insights">
-          {initialData.insights.map((insight) => (
-            <span key={insight}>{insight}</span>
-          ))}
+        <div className="filtersInline">
+          <select value={period} onChange={(event) => setPeriod(event.target.value as PeriodValue)}>
+            <option value="7">Últimos 7 dias</option>
+            <option value="30">Últimos 30 dias</option>
+            <option value="90">Últimos 90 dias</option>
+            <option value="custom">Personalizado</option>
+            <option value="all">Todo histórico</option>
+          </select>
+          {period === "custom" ? (
+            <>
+              <input type="date" value={customStart} onChange={(event) => setCustomStart(event.target.value)} />
+              <input type="date" value={customEnd} onChange={(event) => setCustomEnd(event.target.value)} />
+            </>
+          ) : null}
         </div>
       </section>
 
       <section className="metricsGrid">
-        <MetricCard label="Leads" value={number.format(initialData.totals.leads)} detail="Captados no período disponível" />
-        <MetricCard
-          label="Atributos"
-          value={number.format(initialData.totals.attributes)}
-          detail={`${number.format(initialData.totals.attributedLeads)} leads enriquecidos`}
-        />
+        <MetricCard label="Leads" value={number.format(summary.total)} detail={metricCountDelta(summary.total, previousSummary.total)} />
+        <MetricCard label="Leads quentes" value={number.format(summary.hot)} detail={`${summary.hotRate.toFixed(1)}% · ${metricDelta(summary.hotRate, previousSummary.hotRate, " p.p.")}`} tone="warn" />
         <MetricCard
           label="Qualificados"
-          value={number.format(initialData.totals.qualified)}
-          detail={`${initialData.totals.qualificationRate.toFixed(1)}% de qualificação`}
+          value={number.format(summary.qualified)}
+          detail={`${summary.qualificationRate.toFixed(1)}% · ${metricDelta(summary.qualificationRate, previousSummary.qualificationRate, " p.p.")}`}
           tone="good"
         />
         <MetricCard
-          label="Estrutura ativa"
-          value={`${initialData.totals.activeCampaigns}/${initialData.totals.activeAdsets}/${initialData.totals.activeAds}`}
-          detail="Campanhas, conjuntos e anúncios"
+          label="Agendados"
+          value={number.format(summary.scheduled)}
+          detail={`${summary.scheduledRate.toFixed(1)}% · ${metricDelta(summary.scheduledRate, previousSummary.scheduledRate, " p.p.")}`}
         />
         <MetricCard
-          label="Melhor taxa"
+          label="Melhor taxa do recorte"
           value={topRow ? `${topRow.qualificationRate.toFixed(1)}%` : "0%"}
           detail={topRow?.name ?? "Sem histórico"}
           tone="warn"
@@ -518,9 +676,9 @@ function DashboardOverview({ initialData }: Props) {
             </div>
             <span>{formatDate(initialData.updatedAt)}</span>
           </div>
-          <MiniTrend data={initialData.trends} />
+          <MiniTrend data={trendRows.length ? trendRows : [{ date: new Date().toISOString(), leads: 0, qualified: 0 }]} />
           <div className="trendBars">
-            {initialData.trends.slice(-12).map((item) => (
+            {trendRows.slice(-12).map((item) => (
               <div key={item.date}>
                 <i style={{ height: `${Math.max(8, item.leads)}px` }} />
                 <span>{formatDate(item.date)}</span>
@@ -537,14 +695,33 @@ function DashboardOverview({ initialData }: Props) {
             </div>
           </div>
           <div className="funnel">
-            {initialData.funnel.map((step, index) => (
+            {funnel.map((step, index) => (
               <div key={step.label} className="funnelStep">
                 <span>{step.label}</span>
-                <strong>{index === 2 ? `${step.value.toFixed(1)}%` : number.format(step.value)}</strong>
-                {index < 2 ? <Bar value={step.value} max={initialData.funnel[0].value} /> : null}
+                <strong>{number.format(step.value)}</strong>
+                <small>{pct(step.value, summary.total).toFixed(1)}% dos leads</small>
+                <Bar value={step.value} max={summary.total} />
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      <section className="decisionGrid">
+        <div className="decisionCard">
+          <span>Maior volume</span>
+          <b>{volumeWinner?.name ?? "Sem dados"}</b>
+          <small>{volumeWinner ? `${number.format(volumeWinner.leads)} leads no recorte` : "Aguardando período com leads"}</small>
+        </div>
+        <div className="decisionCard">
+          <span>Melhor qualidade</span>
+          <b>{qualityWinner?.name ?? "Sem dados"}</b>
+          <small>{qualityWinner ? `${qualityWinner.qualificationRate.toFixed(1)}% de qualificação` : "Precisa de pelo menos 2 leads"}</small>
+        </div>
+        <div className="decisionCard">
+          <span>Ponto de atenção</span>
+          <b>{attentionRow?.name ?? "Sem dados"}</b>
+          <small>{attentionRow ? `${attentionRow.qualificationRate.toFixed(1)}% com ${number.format(attentionRow.leads)} leads` : "Nenhum item com volume mínimo"}</small>
         </div>
       </section>
 
@@ -552,15 +729,21 @@ function DashboardOverview({ initialData }: Props) {
         <div className="panelHead tools">
           <div>
             <p className="eyebrow">Ranking operacional</p>
-            <h3>{view === "campaigns" ? "Campanhas, conjuntos e anúncios" : "Fontes de aquisição"}</h3>
+            <h3>{levelLabel}</h3>
           </div>
           <div className="controls">
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filtrar" />
             <div className="segmented">
-              <button className={view === "campaigns" ? "active" : ""} onClick={() => setView("campaigns")}>
+              <button className={view === "campaign" ? "active" : ""} onClick={() => setView("campaign")}>
                 Campanhas
               </button>
-              <button className={view === "sources" ? "active" : ""} onClick={() => setView("sources")}>
+              <button className={view === "adset" ? "active" : ""} onClick={() => setView("adset")}>
+                Conjuntos
+              </button>
+              <button className={view === "ad" ? "active" : ""} onClick={() => setView("ad")}>
+                Anúncios
+              </button>
+              <button className={view === "source" ? "active" : ""} onClick={() => setView("source")}>
                 Fontes
               </button>
             </div>
