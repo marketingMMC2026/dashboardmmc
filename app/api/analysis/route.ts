@@ -63,6 +63,7 @@ export async function POST(request: Request) {
     ...(body.images ?? []).slice(0, 3).map((image) => ({
       type: "input_image",
       image_url: image.dataUrl,
+      detail: "low",
     })),
   ];
 
@@ -92,6 +93,8 @@ export async function POST(request: Request) {
   });
 
   if (!response.ok) {
+    const errorText = await response.text();
+    console.error("OpenAI analysis error", errorText);
     return NextResponse.json(
       { error: "A OpenAI respondeu com erro ao gerar a análise. Verifique a chave e o modelo configurado." },
       { status: 502 },
