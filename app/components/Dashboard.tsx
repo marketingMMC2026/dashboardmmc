@@ -62,6 +62,7 @@ const defaultLeadColumns: ColumnKey[] = [
 
 type PeriodValue = "7" | "30" | "90" | "custom" | "all";
 type DateRange = { start: number | null; end: number | null; label: string };
+type AnalysisImage = { name: string; dataUrl: string };
 
 function formatDate(value?: string) {
   if (!value) return "-";
@@ -241,6 +242,36 @@ function downloadLeadsCsv(leads: LeadRow[]) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function imageToDataUrl(file: File): Promise<AnalysisImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Não foi possível carregar a imagem."));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("Não foi possível processar a imagem."));
+      image.onload = () => {
+        const maxSize = 1400;
+        const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * scale));
+        canvas.height = Math.max(1, Math.round(image.height * scale));
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("Não foi possível preparar a imagem."));
+          return;
+        }
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve({
+          name: file.name,
+          dataUrl: canvas.toDataURL("image/jpeg", 0.82),
+        });
+      };
+      image.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function Bar({ value, max }: { value: number; max: number }) {
@@ -645,6 +676,7 @@ function DashboardOverview({ initialData }: Props) {
   const [analysisMode, setAnalysisMode] = useState("scale");
   const [analysisPrompt, setAnalysisPrompt] = useState("");
   const [analysis, setAnalysis] = useState("");
+  const [analysisImages, setAnalysisImages] = useState<AnalysisImage[]>([]);
   const [analysisStatus, setAnalysisStatus] = useState<"idle" | "loading" | "error">("idle");
 
   const currentRange = useMemo(() => buildPeriodRange(period, customStart, customEnd), [customEnd, customStart, period]);
@@ -694,6 +726,7 @@ function DashboardOverview({ initialData }: Props) {
           previousSummary,
           ranking: rows.slice(0, 12),
           trend: trendRows.slice(-14),
+          images: analysisImages,
           decision: {
             volumeWinner,
             qualityWinner,
@@ -708,6 +741,18 @@ function DashboardOverview({ initialData }: Props) {
     } catch (error) {
       setAnalysisStatus("error");
       setAnalysis(error instanceof Error ? error.message : "Não foi possível gerar a análise.");
+    }
+  }
+
+  async function addAnalysisImages(files: FileList | null) {
+    if (!files?.length) return;
+    setAnalysisStatus("idle");
+    try {
+      const nextImages = await Promise.all([...files].slice(0, 3).map((file) => imageToDataUrl(file)));
+      setAnalysisImages((current) => [...current, ...nextImages].slice(0, 3));
+    } catch (error) {
+      setAnalysisStatus("error");
+      setAnalysis(error instanceof Error ? error.message : "Não foi possível anexar a imagem.");
     }
   }
 
@@ -836,6 +881,26 @@ function DashboardOverview({ initialData }: Props) {
             onChange={(event) => setAnalysisPrompt(event.target.value)}
             placeholder="Pergunte algo específico para a IA analisar neste período"
           />
+        </div>
+        <div className="imageUpload">
+          <label>
+            Anexar imagem
+            <input type="file" accept="image/*" multiple onChange={(event) => addAnalysisImages(event.target.files)} />
+          </label>
+          {analysisImages.length ? (
+            <div className="imagePreviewList">
+              {analysisImages.map((image) => (
+                <span key={image.name}>
+                  {image.name}
+                  <button type="button" onClick={() => setAnalysisImages((current) => current.filter((item) => item !== image))}>
+                    Remover
+                  </button>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <small>Use até 3 imagens, como print de campanha, criativo ou relatório.</small>
+          )}
         </div>
         <div className={`aiResult ${analysisStatus === "error" ? "error" : ""}`}>
           {analysis || "A análise vai considerar o período selecionado, o funil, o comparativo anterior e o ranking atual."}

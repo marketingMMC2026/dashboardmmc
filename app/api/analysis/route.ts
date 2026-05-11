@@ -9,6 +9,7 @@ type AnalysisRequest = {
   ranking?: unknown;
   trend?: unknown;
   decision?: unknown;
+  images?: { name: string; dataUrl: string }[];
 };
 
 function modeLabel(mode?: string) {
@@ -52,7 +53,18 @@ export async function POST(request: Request) {
     ranking_atual: body.ranking,
     tendencia_recente: body.trend,
     destaques_calculados: body.decision,
+    imagens_anexadas: body.images?.map((image) => image.name) ?? [],
   };
+  const content = [
+    {
+      type: "input_text",
+      text: JSON.stringify(input),
+    },
+    ...(body.images ?? []).slice(0, 3).map((image) => ({
+      type: "input_image",
+      image_url: image.dataUrl,
+    })),
+  ];
 
   const response = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -69,8 +81,13 @@ export async function POST(request: Request) {
         "Responda em portugues do Brasil, direto e executivo.",
         "Estruture em: leitura do periodo, principais vencedores, pontos de atencao, proximas acoes.",
       ].join("\n"),
-      input: JSON.stringify(input),
-      max_output_tokens: 900,
+      input: [
+        {
+          role: "user",
+          content,
+        },
+      ],
+      max_output_tokens: 2600,
     }),
   });
 

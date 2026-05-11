@@ -663,6 +663,8 @@ textarea {
 
 .aiResult {
   min-height: 128px;
+  max-height: 560px;
+  overflow: auto;
   white-space: pre-wrap;
   padding: 14px;
   border: 1px solid var(--line);
@@ -676,6 +678,69 @@ textarea {
   border-color: rgba(177, 61, 58, 0.25);
   background: rgba(177, 61, 58, 0.08);
   color: var(--red);
+}
+
+.imageUpload {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfbf9;
+}
+
+.imageUpload label {
+  display: inline-flex;
+  width: max-content;
+  min-height: 34px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.imageUpload input {
+  display: none;
+}
+
+.imageUpload small {
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.imagePreviewList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.imagePreviewList span {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 6px 5px 10px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.imagePreviewList button {
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  background: #eef1ed;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .leadsTable {
