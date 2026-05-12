@@ -69,9 +69,12 @@ function formatDate(value?: string) {
   return new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit" }).format(new Date(value));
 }
 
-function formatFullDate(value?: string) {
+function formatFullDateTime(value?: string) {
   if (!value) return "-";
-  return new Intl.DateTimeFormat("pt-BR").format(new Date(value));
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(value));
 }
 
 function boolLabel(value: boolean | null) {
@@ -206,7 +209,7 @@ function csvEscape(value: unknown) {
 function downloadLeadsCsv(leads: LeadRow[]) {
   const baseColumns: { key: string; label: string; value: (lead: LeadRow) => unknown }[] = [
     { key: "id", label: "id", value: (lead) => lead.id },
-    { key: "createdAt", label: "data_cadastro", value: (lead) => formatFullDate(lead.createdAt) },
+    { key: "createdAt", label: "data_cadastro", value: (lead) => formatFullDateTime(lead.createdAt) },
     { key: "name", label: "nome", value: (lead) => lead.name },
     { key: "phone", label: "telefone", value: (lead) => lead.phone },
     { key: "email", label: "email", value: (lead) => lead.email },
@@ -366,7 +369,7 @@ function RankingTable({ rows }: { rows: CampaignRow[] }) {
 }
 
 function LeadCell({ lead, column }: { lead: LeadRow; column: ColumnKey }) {
-  if (column === "createdAt") return <span>{formatFullDate(lead.createdAt)}</span>;
+  if (column === "createdAt") return <span>{formatFullDateTime(lead.createdAt)}</span>;
 
   if (column === "contact") {
     return (

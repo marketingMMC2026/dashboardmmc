@@ -174,6 +174,104 @@ function isScheduledStatus(status: string) {
   return normalized.includes("agendado") || normalized.includes("quer agendar");
 }
 
+function meaningful(value: string) {
+  return Boolean(value && value !== "-" && value !== "Sem nome" && !value.includes("{{"));
+}
+
+function normalizePhoneKey(phone: string) {
+  let digits = phone.replace(/\D/g, "");
+  if (digits.startsWith("55") && digits.length > 11) digits = digits.slice(2);
+  return digits.length >= 8 ? `phone:${digits}` : "";
+}
+
+function normalizeEmailKey(email: string) {
+  const cleaned = email.trim().toLowerCase();
+  return cleaned && cleaned !== "-" && cleaned.includes("@") ? `email:${cleaned}` : "";
+}
+
+function leadIdentityKey(lead: LeadRow) {
+  return normalizePhoneKey(lead.phone) || normalizeEmailKey(lead.email) || `id:${lead.id}`;
+}
+
+function pickRicher(current: string, next: string) {
+  if (!meaningful(current)) return next;
+  if (!meaningful(next)) return current;
+  return next.length > current.length ? next : current;
+}
+
+function mergeSource(current: string, next: string) {
+  if (!meaningful(current)) return next;
+  if (!meaningful(next) || current.toLowerCase() === next.toLowerCase()) return current;
+  const parts = current.split(" + ");
+  return parts.some((part) => part.toLowerCase() === next.toLowerCase()) ? current : `${current} + ${next}`;
+}
+
+function mergeNullableBoolean(current: boolean | null, next: boolean | null) {
+  if (current === true || next === true) return true;
+  if (current === false || next === false) return false;
+  return null;
+}
+
+function mergeQuality(current: LeadRow["quality"], next: LeadRow["quality"]) {
+  if (current === "hot" || next === "hot") return "hot";
+  if (current === "low" && next === "low") return "low";
+  return "regular";
+}
+
+function mergeAttributes(current: LeadRow["attributes"], next: LeadRow["attributes"]) {
+  const merged = new Map(current.map((attr) => [attr.key, attr.value]));
+  for (const attr of next) {
+    if (!meaningful(merged.get(attr.key) ?? "")) merged.set(attr.key, attr.value);
+  }
+  return [...merged.entries()]
+    .map(([key, value]) => ({ key, value }))
+    .sort((a, b) => a.key.localeCompare(b.key));
+}
+
+function mergeSummaries(current: string, next: string) {
+  if (!meaningful(current)) return next;
+  if (!meaningful(next) || current === next) return current;
+  return current.includes(next) ? current : `${current} | ${next}`;
+}
+
+function mergeLeadRows(current: LeadRow, next: LeadRow): LeadRow {
+  const first = next.createdAt < current.createdAt ? next : current;
+  const source = first === next ? mergeSource(next.source, current.source) : mergeSource(current.source, next.source);
+
+  return {
+    id: first.id,
+    createdAt: first.createdAt,
+    name: pickRicher(current.name, next.name),
+    phone: pickRicher(current.phone, next.phone),
+    email: pickRicher(current.email, next.email),
+    source,
+    campaign: pickRicher(current.campaign, next.campaign),
+    adset: pickRicher(current.adset, next.adset),
+    ad: pickRicher(current.ad, next.ad),
+    form: pickRicher(current.form, next.form),
+    qualified: current.qualified || next.qualified,
+    scheduled: current.scheduled || next.scheduled,
+    hasOffice: mergeNullableBoolean(current.hasOffice, next.hasOffice),
+    revenueRange: pickRicher(current.revenueRange, next.revenueRange),
+    scheduleStatus: pickRicher(current.scheduleStatus, next.scheduleStatus),
+    summary: mergeSummaries(current.summary, next.summary),
+    quality: mergeQuality(current.quality, next.quality),
+    attributes: mergeAttributes(current.attributes, next.attributes),
+  };
+}
+
+function dedupeLeadRows(rows: LeadRow[]) {
+  const byIdentity = new Map<string, LeadRow>();
+
+  for (const row of rows) {
+    const key = leadIdentityKey(row);
+    const current = byIdentity.get(key);
+    byIdentity.set(key, current ? mergeLeadRows(current, row) : row);
+  }
+
+  return [...byIdentity.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
 function buildRow(
   id: string,
   name: string,
@@ -316,15 +414,6 @@ export async function getDashboardData(): Promise<DashboardData> {
       }
     }
 
-    const trendsByDate = new Map<string, TrendRow>();
-    for (const lead of leads) {
-      const date = new Date(lead.created_at).toISOString().slice(0, 10);
-      const row = trendsByDate.get(date) ?? { date, leads: 0, qualified: 0 };
-      row.leads += 1;
-      row.qualified += qualifiedIds.has(lead.id) ? 1 : 0;
-      trendsByDate.set(date, row);
-    }
-
     const campaigns = [...rowsByAsset.entries()]
       .map(([assetId, bucket]) => {
         const asset = assetById.get(assetId);
@@ -355,8 +444,6 @@ export async function getDashboardData(): Promise<DashboardData> {
       .sort((a, b) => b.qualified - a.qualified || b.leads - a.leads)
       .slice(0, 30);
 
-    const totalLeads = leads.length;
-    const totalQualified = qualifiedIds.size;
     const meta = sourceRows.find((row) => row.name === "meta_ads" || row.source === "META");
     const best = [...sourceRows, ...campaigns].sort(
       (a, b) => b.qualificationRate - a.qualificationRate || b.qualified - a.qualified,
@@ -409,6 +496,18 @@ export async function getDashboardData(): Promise<DashboardData> {
         };
       })
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const uniqueLeadRows = dedupeLeadRows(leadRows);
+    const totalLeads = uniqueLeadRows.length;
+    const totalQualified = uniqueLeadRows.filter((lead) => lead.qualified).length;
+    const uniqueTrendsByDate = new Map<string, TrendRow>();
+
+    for (const lead of uniqueLeadRows) {
+      const date = new Date(lead.createdAt).toISOString().slice(0, 10);
+      const row = uniqueTrendsByDate.get(date) ?? { date, leads: 0, qualified: 0 };
+      row.leads += 1;
+      row.qualified += lead.qualified ? 1 : 0;
+      uniqueTrendsByDate.set(date, row);
+    }
 
     return {
       updatedAt: new Date().toISOString(),
@@ -428,13 +527,13 @@ export async function getDashboardData(): Promise<DashboardData> {
         { label: "Leads qualificados", value: totalQualified },
         { label: "Taxa de qualificação", value: pct(totalQualified, totalLeads) },
       ],
-      trends: [...trendsByDate.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45),
+      trends: [...uniqueTrendsByDate.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-45),
       sources: sourceRows,
       campaigns,
-      leads: leadRows,
+      leads: uniqueLeadRows,
       insights: [
         best ? `${best.name} lidera em taxa de qualificação (${best.qualificationRate}%).` : "Ainda não há volume suficiente para apontar uma vencedora.",
-        `${attrsByLead.size} leads têm atributos enriquecidos; esta passa a ser a camada principal de leitura do funil.`,
+        `${uniqueLeadRows.length} contatos únicos aparecem no dashboard; cadastros repetidos por telefone ou e-mail são consolidados na lista.`,
         meta ? `Meta Ads concentra ${meta.leads} leads; acompanhe a qualidade antes de ampliar verba.` : "Meta Ads ainda não apareceu como fonte principal no recorte atual.",
       ],
     };
