@@ -33,8 +33,8 @@ export type LeadRow = {
   adset: string;
   ad: string;
   form: string;
-  qualified: boolean;
-  scheduled: boolean;
+  qualified: boolean | null;
+  scheduled: boolean | null;
   hasOffice: boolean | null;
   revenueRange: string;
   scheduleStatus: string;
@@ -173,6 +173,31 @@ function isScheduledStatus(status: string) {
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
   return normalized.includes("agendado") || normalized.includes("quer agendar");
+}
+
+function isUnscheduledStatus(status: string) {
+  const normalized = status
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+  return normalized.includes("nao agendado") || normalized.includes("nao quer") || normalized.includes("sem agendamento");
+}
+
+function normalizeOptionalBoolean(value: boolean | null | undefined, attrs: Map<string, string> | undefined, keys: string[]) {
+  for (const key of keys) {
+    const attrValue = attrs?.get(key);
+    if (isTruthy(attrValue)) return true;
+    if (isFalsy(attrValue)) return false;
+  }
+
+  return value === true ? true : null;
+}
+
+function normalizeScheduleStatus(status: string) {
+  if (!meaningful(status)) return null;
+  if (isScheduledStatus(status)) return true;
+  if (isUnscheduledStatus(status)) return false;
+  return null;
 }
 
 function meaningful(value: string) {
@@ -319,8 +344,8 @@ function mergeLeadRows(current: LeadRow, next: LeadRow): LeadRow {
     adset: pickRicher(current.adset, next.adset),
     ad: pickRicher(current.ad, next.ad),
     form: pickRicher(current.form, next.form),
-    qualified: current.qualified || next.qualified,
-    scheduled: current.scheduled || next.scheduled,
+    qualified: mergeNullableBoolean(current.qualified, next.qualified),
+    scheduled: mergeNullableBoolean(current.scheduled, next.scheduled),
     hasOffice: mergeNullableBoolean(current.hasOffice, next.hasOffice),
     revenueRange: pickRicher(current.revenueRange, next.revenueRange),
     scheduleStatus: pickRicher(current.scheduleStatus, next.scheduleStatus),
@@ -531,9 +556,9 @@ export async function getDashboardData(): Promise<DashboardData> {
         const attrs = attrsByLead.get(lead.id);
         const media = mediaByLead.get(lead.id);
         const scheduleStatus = firstAttribute(attrs, ["agendamento_status", "data_agendamento"]);
-        const scheduled = isScheduledStatus(scheduleStatus);
+        const scheduled = normalizeScheduleStatus(scheduleStatus);
         const hasOffice = normalizeBoolean(attrs, ["tem_escritorio_", "Tem Escritório"]);
-        const qualified = qualifiedIds.has(lead.id);
+        const qualified = normalizeOptionalBoolean(lead.qualification, attrs, ["lead_qualificado_", "lead_qualificado", "qualificado"]);
         const phone = firstAttribute(attrs, ["phone_number", "WhatsApp", "numero_whatsapp", "telefone", "phone"]);
         const email = firstAttribute(attrs, ["email", "E-mail"]);
         const revenueRange = normalizeLabel(
@@ -548,7 +573,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         const allAttributes = [...(attrs?.entries() ?? [])]
           .map(([key, value]) => ({ key, value }))
           .sort((a, b) => a.key.localeCompare(b.key));
-        const isHot = qualified || scheduled || hasOffice === true || Boolean(revenueRange && !revenueRange.toLowerCase().includes("menos"));
+        const isHot = qualified === true || scheduled === true || hasOffice === true || Boolean(revenueRange && !revenueRange.toLowerCase().includes("menos"));
         const missingCoreData = !phone || !email || email.includes("{{");
         const quality: LeadRow["quality"] = isHot ? "hot" : missingCoreData || hasOffice === false ? "low" : "regular";
 

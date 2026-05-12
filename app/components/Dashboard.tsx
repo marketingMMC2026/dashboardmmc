@@ -649,11 +649,13 @@ function LeadsView({ data }: { data: DashboardData }) {
             <option value="all">Qualificação</option>
             <option value="true">Qualificados</option>
             <option value="false">Não qualificados</option>
+            <option value="null">Sem informação</option>
           </select>
           <select value={scheduled} onChange={(event) => { setScheduled(event.target.value); setPage(1); }}>
             <option value="all">Agendamento</option>
             <option value="true">Agendados</option>
             <option value="false">Não agendados</option>
+            <option value="null">Sem informação</option>
           </select>
           <select value={hasOffice} onChange={(event) => { setHasOffice(event.target.value); setPage(1); }}>
             <option value="all">Tem escritório?</option>
