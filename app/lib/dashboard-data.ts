@@ -24,6 +24,7 @@ export type FunnelStep = {
 export type LeadRow = {
   id: string;
   createdAt: string;
+  firstSeenAt: string;
   name: string;
   phone: string;
   email: string;
@@ -251,7 +252,9 @@ function phoneLooksMistyped(current: LeadRow, next: LeadRow) {
 }
 
 function shouldMergeLeadRows(current: LeadRow, next: LeadRow) {
-  const minutesApart = Math.abs(new Date(current.createdAt).getTime() - new Date(next.createdAt).getTime()) / 60000;
+  const currentFirstSeen = current.firstSeenAt || current.createdAt;
+  const nextFirstSeen = next.firstSeenAt || next.createdAt;
+  const minutesApart = Math.abs(new Date(currentFirstSeen).getTime() - new Date(nextFirstSeen).getTime()) / 60000;
   if (minutesApart > 30) return false;
   if (hasSharedIdentity(current, next)) return true;
   if (!differentSources(current, next) || !hasManyChatHandoff(current, next) || !nameLooksRelated(current.name, next.name)) return false;
@@ -302,10 +305,12 @@ function mergeSummaries(current: string, next: string) {
 function mergeLeadRows(current: LeadRow, next: LeadRow): LeadRow {
   const latest = next.createdAt > current.createdAt ? next : current;
   const source = latest === next ? mergeSource(current.source, next.source) : mergeSource(next.source, current.source);
+  const firstSeenAt = next.firstSeenAt < current.firstSeenAt ? next.firstSeenAt : current.firstSeenAt;
 
   return {
     id: latest.id,
     createdAt: latest.createdAt,
+    firstSeenAt,
     name: pickRicher(current.name, next.name),
     phone: pickRicher(current.phone, next.phone),
     email: pickRicher(current.email, next.email),
@@ -550,6 +555,7 @@ export async function getDashboardData(): Promise<DashboardData> {
         return {
           id: lead.id,
           createdAt: lastSignalByLead.get(lead.id) || lead.created_at,
+          firstSeenAt: lead.created_at,
           name: firstAttribute(attrs, ["full_name", "Nome completo", "Nome", "name"]) || "Sem nome",
           phone: phone || "-",
           email: email || "-",
@@ -656,6 +662,7 @@ export const sampleDashboardData: DashboardData = {
     {
       id: "8d75b675-4616-4e48-945a-e0f5494001fb",
       createdAt: "2026-05-10T20:47:16.325Z",
+      firstSeenAt: "2026-05-10T20:47:16.325Z",
       name: "Mônica",
       phone: "5591980784796",
       email: "-",
@@ -680,6 +687,7 @@ export const sampleDashboardData: DashboardData = {
     {
       id: "4912dfd9-2fd1-4630-95e4-be11fc481032",
       createdAt: "2026-05-10T18:58:09.496Z",
+      firstSeenAt: "2026-05-10T18:58:09.496Z",
       name: "Gustavo",
       phone: "5533998542823",
       email: "-",
