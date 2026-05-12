@@ -458,6 +458,10 @@ table {
   border-collapse: collapse;
 }
 
+.resizableTable {
+  table-layout: fixed;
+}
+
 th,
 td {
   padding: 14px 12px;
@@ -467,13 +471,51 @@ td {
 }
 
 th {
+  position: relative;
   color: var(--muted);
   font-size: 0.78rem;
   text-transform: uppercase;
 }
 
+.thLabel {
+  display: block;
+  overflow: hidden;
+  padding-right: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 8px;
+  right: 0;
+  bottom: 8px;
+  width: 10px;
+  cursor: col-resize;
+}
+
+.resizeHandle::after {
+  position: absolute;
+  top: 20%;
+  right: 4px;
+  width: 1px;
+  height: 60%;
+  background: #c7cdc8;
+  content: "";
+}
+
+.lockedColumn .thLabel::after {
+  content: " fixo";
+  color: var(--teal);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: none;
+}
+
 td {
+  overflow: hidden;
   font-size: 0.94rem;
+  text-overflow: ellipsis;
 }
 
 .nameCell {
@@ -622,6 +664,14 @@ td {
 .columnConfig input {
   width: 16px;
   height: 16px;
+}
+
+.columnConfig input:disabled {
+  cursor: not-allowed;
+}
+
+.columnConfig label:has(input:disabled) {
+  color: var(--teal);
 }
 
 .exportBar {

@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { MouseEvent as ReactMouseEvent } from "react";
 import type { CampaignRow, DashboardData, LeadRow } from "@/app/lib/dashboard-data";
 
 type Props = {
@@ -53,6 +54,7 @@ const defaultLeadColumns: ColumnKey[] = [
   "contact",
   "source",
   "campaign",
+  "adset",
   "qualified",
   "scheduled",
   "hasOffice",
@@ -60,9 +62,73 @@ const defaultLeadColumns: ColumnKey[] = [
   "form",
 ];
 
+const lockedLeadColumns: ColumnKey[] = ["adset"];
+
+const defaultColumnWidths: Record<ColumnKey, number> = {
+  createdAt: 126,
+  name: 210,
+  contact: 190,
+  source: 180,
+  campaign: 260,
+  adset: 320,
+  ad: 260,
+  form: 210,
+  qualified: 112,
+  scheduled: 112,
+  hasOffice: 132,
+  revenueRange: 140,
+  scheduleStatus: 180,
+  summary: 260,
+};
+
+const validColumnKeys = new Set<ColumnKey>(leadColumns.map((column) => column.key));
+const leadColumnsStorageKey = "dashboard.leads.columns";
+const leadColumnWidthsStorageKey = "dashboard.leads.columnWidths";
+
 type PeriodValue = "7" | "30" | "90" | "custom" | "all";
 type DateRange = { start: number | null; end: number | null; label: string };
 type AnalysisImage = { name: string; dataUrl: string };
+
+function normalizeVisibleColumns(columns: ColumnKey[]) {
+  const next = columns.filter((column) => validColumnKeys.has(column));
+  for (const column of lockedLeadColumns) {
+    if (!next.includes(column)) {
+      const campaignIndex = next.indexOf("campaign");
+      next.splice(campaignIndex >= 0 ? campaignIndex + 1 : next.length, 0, column);
+    }
+  }
+  return next.length ? next : defaultLeadColumns;
+}
+
+function loadVisibleColumns() {
+  if (typeof window === "undefined") return defaultLeadColumns;
+
+  try {
+    const stored = window.localStorage.getItem(leadColumnsStorageKey);
+    if (!stored) return defaultLeadColumns;
+    const parsed = JSON.parse(stored) as ColumnKey[];
+    return normalizeVisibleColumns(Array.isArray(parsed) ? parsed : defaultLeadColumns);
+  } catch {
+    return defaultLeadColumns;
+  }
+}
+
+function loadColumnWidths() {
+  if (typeof window === "undefined") return defaultColumnWidths;
+
+  try {
+    const stored = window.localStorage.getItem(leadColumnWidthsStorageKey);
+    const parsed = stored ? JSON.parse(stored) as Partial<Record<ColumnKey, number>> : {};
+    return {
+      ...defaultColumnWidths,
+      ...Object.fromEntries(
+        Object.entries(parsed).filter(([key, value]) => validColumnKeys.has(key as ColumnKey) && typeof value === "number"),
+      ),
+    };
+  } catch {
+    return defaultColumnWidths;
+  }
+}
 
 function formatDate(value?: string) {
   if (!value) return "-";
@@ -438,7 +504,8 @@ function LeadsView({ data }: { data: DashboardData }) {
   const [revenues, setRevenues] = useState<string[]>([]);
   const [pageSize, setPageSize] = useState(50);
   const [page, setPage] = useState(1);
-  const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(defaultLeadColumns);
+  const [visibleColumns, setVisibleColumns] = useState<ColumnKey[]>(loadVisibleColumns);
+  const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(loadColumnWidths);
   const [selectedLead, setSelectedLead] = useState<LeadRow | null>(null);
 
   const uniqueSources = useMemo(() => [...new Set(data.leads.map((lead) => lead.source).filter(Boolean))].sort(), [data.leads]);
@@ -482,12 +549,40 @@ function LeadsView({ data }: { data: DashboardData }) {
   const pagedLeads = filteredLeads.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const summary = summarizeLeads(filteredLeads);
   const previousSummary = summarizeLeads(previousLeads);
+  const tableWidth = visibleColumns.reduce((total, column) => total + (columnWidths[column] ?? defaultColumnWidths[column]), 92);
+
+  useEffect(() => {
+    window.localStorage.setItem(leadColumnsStorageKey, JSON.stringify(visibleColumns));
+  }, [visibleColumns]);
+
+  useEffect(() => {
+    window.localStorage.setItem(leadColumnWidthsStorageKey, JSON.stringify(columnWidths));
+  }, [columnWidths]);
 
   function toggleColumn(column: ColumnKey) {
+    if (lockedLeadColumns.includes(column)) return;
     setVisibleColumns((current) => {
       if (current.includes(column)) return current.filter((item) => item !== column);
-      return [...current, column];
+      return normalizeVisibleColumns([...current, column]);
     });
+  }
+
+  function startColumnResize(column: ColumnKey, event: ReactMouseEvent<HTMLSpanElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = columnWidths[column] ?? defaultColumnWidths[column];
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const nextWidth = Math.min(520, Math.max(86, startWidth + moveEvent.clientX - startX));
+      setColumnWidths((current) => ({ ...current, [column]: nextWidth }));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   }
 
   return (
@@ -583,6 +678,7 @@ function LeadsView({ data }: { data: DashboardData }) {
                 <input
                   type="checkbox"
                   checked={visibleColumns.includes(column.key)}
+                  disabled={lockedLeadColumns.includes(column.key)}
                   onChange={() => toggleColumn(column.key)}
                 />
                 {column.label}
@@ -599,10 +695,26 @@ function LeadsView({ data }: { data: DashboardData }) {
         </div>
 
         <div className="tableWrap">
-          <table className="leadsTable">
+          <table className="leadsTable resizableTable" style={{ width: `${tableWidth}px`, minWidth: `${tableWidth}px` }}>
+            <colgroup>
+              {visibleColumns.map((column) => (
+                <col key={column} style={{ width: `${columnWidths[column] ?? defaultColumnWidths[column]}px` }} />
+              ))}
+              <col style={{ width: "92px" }} />
+            </colgroup>
             <thead>
               <tr>
-                {visibleColumns.map((column) => <th key={column}>{leadColumns.find((item) => item.key === column)?.label}</th>)}
+                {visibleColumns.map((column) => (
+                  <th key={column} className={lockedLeadColumns.includes(column) ? "lockedColumn" : ""}>
+                    <span className="thLabel">{leadColumns.find((item) => item.key === column)?.label}</span>
+                    <span
+                      className="resizeHandle"
+                      role="separator"
+                      aria-label={`Ajustar largura de ${leadColumns.find((item) => item.key === column)?.label}`}
+                      onMouseDown={(event) => startColumnResize(column, event)}
+                    />
+                  </th>
+                ))}
                 <th>Ações</th>
               </tr>
             </thead>

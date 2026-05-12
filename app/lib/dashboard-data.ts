@@ -184,13 +184,78 @@ function normalizePhoneKey(phone: string) {
   return digits.length >= 8 ? `phone:${digits}` : "";
 }
 
+function phoneDigits(phone: string) {
+  let digits = phone.replace(/\D/g, "");
+  if (digits.startsWith("55") && digits.length > 11) digits = digits.slice(2);
+  return digits;
+}
+
 function normalizeEmailKey(email: string) {
   const cleaned = email.trim().toLowerCase();
   return cleaned && cleaned !== "-" && cleaned.includes("@") ? `email:${cleaned}` : "";
 }
 
-function leadIdentityKey(lead: LeadRow) {
-  return normalizePhoneKey(lead.phone) || normalizeEmailKey(lead.email) || `id:${lead.id}`;
+function comparableName(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nameLooksRelated(current: string, next: string) {
+  const a = comparableName(current);
+  const b = comparableName(next);
+  if (!a || !b || a === "sem nome" || b === "sem nome") return false;
+  if (a === b || a.includes(b) || b.includes(a)) return true;
+
+  const aParts = a.split(" ").filter((part) => part.length > 2);
+  const bParts = b.split(" ").filter((part) => part.length > 2);
+  if (!aParts.length || !bParts.length) return false;
+
+  return aParts[0] === bParts[0] && aParts.some((part) => bParts.includes(part));
+}
+
+function differentSources(current: LeadRow, next: LeadRow) {
+  return current.source.toLowerCase() !== next.source.toLowerCase();
+}
+
+function hasManyChatHandoff(current: LeadRow, next: LeadRow) {
+  return `${current.source} ${next.source}`.toLowerCase().includes("manychat");
+}
+
+function hasSharedIdentity(current: LeadRow, next: LeadRow) {
+  const currentPhone = normalizePhoneKey(current.phone);
+  const nextPhone = normalizePhoneKey(next.phone);
+  const currentEmail = normalizeEmailKey(current.email);
+  const nextEmail = normalizeEmailKey(next.email);
+
+  return Boolean((currentPhone && currentPhone === nextPhone) || (currentEmail && currentEmail === nextEmail));
+}
+
+function phoneLooksMistyped(current: LeadRow, next: LeadRow) {
+  const a = phoneDigits(current.phone);
+  const b = phoneDigits(next.phone);
+  if (a.length < 10 || b.length < 10 || a.length !== b.length) return false;
+  if (a.slice(0, 4) !== b.slice(0, 4)) return false;
+
+  let differences = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    if (a[index] !== b[index]) differences += 1;
+    if (differences > 1) return false;
+  }
+
+  return differences === 1;
+}
+
+function shouldMergeLeadRows(current: LeadRow, next: LeadRow) {
+  const minutesApart = Math.abs(new Date(current.createdAt).getTime() - new Date(next.createdAt).getTime()) / 60000;
+  if (minutesApart > 30) return false;
+  if (hasSharedIdentity(current, next)) return true;
+  if (!differentSources(current, next) || !hasManyChatHandoff(current, next) || !nameLooksRelated(current.name, next.name)) return false;
+  return phoneLooksMistyped(current, next) || !meaningful(current.email) || !meaningful(next.email);
 }
 
 function pickRicher(current: string, next: string) {
@@ -235,12 +300,12 @@ function mergeSummaries(current: string, next: string) {
 }
 
 function mergeLeadRows(current: LeadRow, next: LeadRow): LeadRow {
-  const first = next.createdAt < current.createdAt ? next : current;
-  const source = first === next ? mergeSource(next.source, current.source) : mergeSource(current.source, next.source);
+  const latest = next.createdAt > current.createdAt ? next : current;
+  const source = latest === next ? mergeSource(current.source, next.source) : mergeSource(next.source, current.source);
 
   return {
-    id: first.id,
-    createdAt: first.createdAt,
+    id: latest.id,
+    createdAt: latest.createdAt,
     name: pickRicher(current.name, next.name),
     phone: pickRicher(current.phone, next.phone),
     email: pickRicher(current.email, next.email),
@@ -261,15 +326,18 @@ function mergeLeadRows(current: LeadRow, next: LeadRow): LeadRow {
 }
 
 function dedupeLeadRows(rows: LeadRow[]) {
-  const byIdentity = new Map<string, LeadRow>();
+  const mergedRows: LeadRow[] = [];
 
-  for (const row of rows) {
-    const key = leadIdentityKey(row);
-    const current = byIdentity.get(key);
-    byIdentity.set(key, current ? mergeLeadRows(current, row) : row);
+  for (const row of rows.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const index = mergedRows.findIndex((current) => shouldMergeLeadRows(current, row));
+    if (index >= 0) {
+      mergedRows[index] = mergeLeadRows(mergedRows[index], row);
+    } else {
+      mergedRows.push(row);
+    }
   }
 
-  return [...byIdentity.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  return mergedRows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function buildRow(
@@ -334,11 +402,14 @@ export async function getDashboardData(): Promise<DashboardData> {
     ]);
 
     const leadMap = new Map(leads.map((lead) => [lead.id, lead]));
+    const lastSignalByLead = new Map(leads.map((lead) => [lead.id, lead.created_at]));
     const attrsByLead = new Map<string, Map<string, string>>();
     const rowsByAttribute = new Map<string, { ids: Set<string>; last?: string; source: string }>();
 
     for (const attr of attributes) {
       if (!attr.lead_id || !leadMap.has(attr.lead_id)) continue;
+      const lastSignal = lastSignalByLead.get(attr.lead_id);
+      if (!lastSignal || attr.created_at > lastSignal) lastSignalByLead.set(attr.lead_id, attr.created_at);
       const cleaned = cleanAttribute(attr.value);
       if (!cleaned) continue;
       const leadAttrs = attrsByLead.get(attr.lead_id) ?? new Map<string, string>();
@@ -382,6 +453,8 @@ export async function getDashboardData(): Promise<DashboardData> {
 
     for (const source of sources) {
       if (!source.lead_id || !leadMap.has(source.lead_id)) continue;
+      const lastSignal = lastSignalByLead.get(source.lead_id);
+      if (!lastSignal || source.created_at > lastSignal) lastSignalByLead.set(source.lead_id, source.created_at);
 
       const provider = source.integration_id ? providerById.get(source.integration_id) : undefined;
       const label = source.source_type || provider || "Fonte não classificada";
@@ -476,7 +549,7 @@ export async function getDashboardData(): Promise<DashboardData> {
 
         return {
           id: lead.id,
-          createdAt: lead.created_at,
+          createdAt: lastSignalByLead.get(lead.id) || lead.created_at,
           name: firstAttribute(attrs, ["full_name", "Nome completo", "Nome", "name"]) || "Sem nome",
           phone: phone || "-",
           email: email || "-",
