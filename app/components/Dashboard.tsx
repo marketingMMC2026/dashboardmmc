@@ -519,11 +519,11 @@ function LeadsView({ data }: { data: DashboardData }) {
 
   const applyLeadFilters = (lead: LeadRow, range: DateRange) => {
     const query = search.trim().toLowerCase();
-    const text = `${lead.name} ${lead.phone} ${lead.email} ${lead.source} ${lead.campaign} ${lead.adset} ${lead.ad} ${lead.form} ${lead.summary}`.toLowerCase();
+    const leadName = lead.name.toLowerCase();
 
     if (!inRange(lead.createdAt, range)) return false;
     if (leadView !== "all" && lead.quality !== leadView) return false;
-    if (query && !text.includes(query)) return false;
+    if (query && !leadName.includes(query)) return false;
     if (source !== "all" && lead.source !== source) return false;
     if (campaigns.length && !campaigns.includes(lead.campaign)) return false;
     if (adsets.length && !adsets.includes(lead.adset)) return false;
